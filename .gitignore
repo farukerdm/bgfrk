@@ -1,65 +1,31 @@
+# Veritabanı dosyaları
+mq_meta.db
+mq_meta.db-journal
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual Environment - but keep our code files
+# Sanal ortam
 .venv/
 venv/
 ENV/
-env/
 
-# Keep our main code files in .venv
-!.venv/anasayfa.py
-!.venv/fix_with_symbols.py
-!.venv/pstandaloneinstall.py
-!.venv/test_basic.py
-!.venv/auto_save.py
-!.venv/requirements.txt
-!.venv/README.md
+# Şifreleme anahtarı
+encryption.key
 
-# Ignore virtual environment packages
-.venv/Lib/
-.venv/Scripts/
-.venv/Include/
-.venv/__pycache__/
-.venv/pyvenv.cfg
+# Uploads
+uploads/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Logs
-*.log
-
-# Uploads (eğer büyük dosyalar varsa)
-uploads/*
-!uploads/.gitkeep

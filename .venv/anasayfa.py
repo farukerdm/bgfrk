@@ -26,6 +26,14 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
     print("Paramiko kütüphanesi bulunamadı. SSH özellikleri çalışmayacak.")
 
+# Şifreleme için cryptography
+try:
+    from cryptography.fernet import Fernet
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    print("Cryptography kütüphanesi bulunamadı. Şifre şifreleme özellikleri çalışmayacak.")
+
 # ---- PostgreSQL sürücü katmanı (psycopg2 -> psycopg3 fallback) ----
 try:
     import psycopg2 as _pg
@@ -44,8 +52,10 @@ except Exception:
 
 APP_TITLE = "Multiquery Module"
 
-# --- META DB: SQLite dosya yolu ---
-SQLITE_PATH = os.environ.get("PG_UI_META_SQLITE", "mq_meta.db")
+# --- META DB: SQLite dosya yolu (.venv içerisinde) ---
+# Eğer environment variable yoksa, .venv dizini içerisinde oluştur
+_default_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mq_meta.db")
+SQLITE_PATH = os.environ.get("PG_UI_META_SQLITE", _default_db_path)
 
 MAX_ROWS = int(os.environ.get("PG_UI_MAX_ROWS", "1000"))
 WORKERS = int(os.environ.get("PG_UI_WORKERS", "16"))
@@ -55,6 +65,61 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", "dev-secret-change-me")
 app.config['JSON_AS_ASCII'] = False
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+# Şifreleme anahtarı (güvenli bir yerde saklanmalı - production'da environment variable kullanın)
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "your-secret-encryption-key-change-this-in-production")
+
+def get_or_create_encryption_key():
+    """Şifreleme anahtarını al veya oluştur"""
+    # .venv dizini içerisinde encryption.key dosyasını oluştur
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    key_file = os.path.join(current_dir, "encryption.key")
+    
+    if os.path.exists(key_file):
+        with open(key_file, 'rb') as f:
+            return f.read()
+    else:
+        # Yeni anahtar oluştur
+        if CRYPTO_AVAILABLE:
+            key = Fernet.generate_key()
+            with open(key_file, 'wb') as f:
+                f.write(key)
+            print(f"Şifreleme anahtarı oluşturuldu: {key_file}")
+            return key
+        else:
+            return None
+
+# Şifreleme anahtarını yükle
+if CRYPTO_AVAILABLE:
+    FERNET_KEY = get_or_create_encryption_key()
+    if FERNET_KEY:
+        cipher_suite = Fernet(FERNET_KEY)
+    else:
+        cipher_suite = None
+else:
+    cipher_suite = None
+
+def encrypt_password(password: str) -> str:
+    """Şifreyi şifrele"""
+    if not cipher_suite or not password:
+        return password
+    try:
+        encrypted = cipher_suite.encrypt(password.encode())
+        return encrypted.decode()
+    except Exception as e:
+        print(f"Şifreleme hatası: {e}")
+        return password
+
+def decrypt_password(encrypted_password: str) -> str:
+    """Şifreyi çöz"""
+    if not cipher_suite or not encrypted_password:
+        return encrypted_password
+    try:
+        decrypted = cipher_suite.decrypt(encrypted_password.encode())
+        return decrypted.decode()
+    except Exception as e:
+        print(f"Şifre çözme hatası: {e}")
+        return encrypted_password
 
 # UTF-8 encoding için response handler
 @app.after_request
@@ -236,6 +301,7 @@ def init_sunucu_envanteri_table():
                 ip TEXT NOT NULL,
                 ssh_port INTEGER DEFAULT 22,
                 ssh_user TEXT,
+                ssh_password TEXT,
                 os_info TEXT,
                 cpu_info TEXT,
                 cpu_cores TEXT,
@@ -250,6 +316,14 @@ def init_sunucu_envanteri_table():
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Mevcut tabloya ssh_password sütunu ekle (eğer yoksa)
+        try:
+            db_execute("ALTER TABLE sunucu_envanteri ADD COLUMN ssh_password TEXT")
+            print("ssh_password sütunu eklendi.")
+        except:
+            pass  # Sütun zaten varsa hata vermez
+            
     except Exception as e:
         print(f"Sunucu envanteri tablosu oluşturulurken hata: {e}")
 
@@ -259,6 +333,11 @@ def save_sunucu_bilgileri(server_info):
         # Disks bilgisini JSON string'e çevir
         import json
         disks_json = json.dumps(server_info.get('disks', []))
+        
+        # Şifreyi şifrele (eğer varsa)
+        encrypted_password = None
+        if server_info.get('ssh_password'):
+            encrypted_password = encrypt_password(server_info.get('ssh_password'))
         
         # Önce aynı IP'ye sahip sunucu var mı kontrol et (sadece IP bazında duplicate kontrol)
         existing_server = db_query("""
@@ -303,7 +382,7 @@ def save_sunucu_bilgileri(server_info):
                 # Değişiklik varsa güncelle
                 db_execute("""
                     UPDATE sunucu_envanteri SET
-                        hostname = ?, ip = ?, ssh_port = ?, ssh_user = ?, 
+                        hostname = ?, ip = ?, ssh_port = ?, ssh_user = ?, ssh_password = ?,
                         os_info = ?, cpu_info = ?, cpu_cores = ?, ram_total = ?, 
                         disks = ?, uptime = ?, postgresql_status = ?, 
                         postgresql_version = ?, postgresql_replication = ?, 
@@ -314,6 +393,7 @@ def save_sunucu_bilgileri(server_info):
                     server_info.get('ip', ''),
                     server_info.get('ssh_port', 22),
                     server_info.get('ssh_user', ''),
+                    encrypted_password,
                     server_info.get('os_info', 'N/A'),
                     server_info.get('cpu_info', 'N/A'),
                     server_info.get('cpu_cores', 'N/A'),
@@ -337,15 +417,16 @@ def save_sunucu_bilgileri(server_info):
             # Yoksa ekle
             db_execute("""
                 INSERT INTO sunucu_envanteri 
-                (hostname, ip, ssh_port, ssh_user, os_info, cpu_info, cpu_cores, 
+                (hostname, ip, ssh_port, ssh_user, ssh_password, os_info, cpu_info, cpu_cores, 
                  ram_total, disks, uptime, postgresql_status, postgresql_version, 
                  postgresql_replication, pgbackrest_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 server_info.get('hostname', ''),
                 server_info.get('ip', ''),
                 server_info.get('ssh_port', 22),
                 server_info.get('ssh_user', ''),
+                encrypted_password,
                 server_info.get('os_info', 'N/A'),
                 server_info.get('cpu_info', 'N/A'),
                 server_info.get('cpu_cores', 'N/A'),
@@ -669,6 +750,7 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         'ip': ip,
         'ssh_port': ssh_port,
         'ssh_user': ssh_user,
+        'ssh_password': password,  # Şifreyi de kaydet
         'os_info': 'N/A',
         'cpu_info': 'N/A',
         'cpu_cores': 'N/A',
@@ -2332,6 +2414,15 @@ TEMPLATE_LANDING = r"""<!doctype html>
             <a href="/envanter" class="menu-btn">Envanter</a>
             {% else %}
             <a href="#" class="menu-btn" onclick="showPermissionAlert('multiquery')">Envanter</a>
+            {% endif %}
+          </div>
+
+          <!-- Healthcheck -->
+          <div class="menu-item" aria-expanded="false">
+            {% if session.get('is_admin') or check_permission(session.get('user_id'), 'multiquery') %}
+            <a href="/healthcheck" class="menu-btn">Healthcheck</a>
+            {% else %}
+            <a href="#" class="menu-btn" onclick="showPermissionAlert('multiquery')">Healthcheck</a>
             {% endif %}
           </div>
 
@@ -4242,6 +4333,7 @@ TEMPLATE_SUNUCU_BILGILERI = r"""
           ip: '{{ server_info.ip }}',
           ssh_port: '{{ server_info.ssh_port }}',
           ssh_user: '{{ server_info.ssh_user }}',
+          ssh_password: '{{ server_info.ssh_password }}',
           os_info: '{{ server_info.os_info }}',
           cpu_info: '{{ server_info.cpu_info }}',
           cpu_cores: '{{ server_info.cpu_cores }}',
@@ -4268,6 +4360,199 @@ TEMPLATE_SUNUCU_BILGILERI = r"""
     </script>
     
     {{ theme_script|safe }}
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
+"""
+
+# Healthcheck sayfası
+TEMPLATE_HEALTHCHECK = r"""
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Healthcheck</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      :root {
+        --bg: #0f1216; --panel: #171b21; --muted: #9aa5b1; --txt: #eef2f6; --brand: #50b0ff; --accent: #7cf; --ring: rgba(80,176,255,.35);
+        --drop: #0f1216; --hover: #212833; --border: #243044;
+      }
+      
+      [data-theme="light"] {
+        --bg: #f8fafc; --panel: #ffffff; --muted: #64748b; --txt: #1e293b; --brand: #3b82f6; --accent: #06b6d4; --ring: rgba(59,130,246,.35);
+        --drop: #ffffff; --hover: #f1f5f9; --border: #e2e8f0;
+      }
+      
+      body { 
+        background: var(--bg); 
+        color: var(--txt); 
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        padding-top: 20px;
+      }
+      
+      .container-lg { 
+        background: var(--panel); 
+        border-radius: 1rem; 
+        padding: 2rem; 
+        margin-top: 1rem; 
+        border: 1px solid var(--border);
+      }
+      
+      .header { 
+        display: flex; 
+        align-items: center; 
+        justify-content: space-between; 
+        margin-bottom: 2rem; 
+      }
+      
+      .header h1 { 
+        margin: 0; 
+        color: var(--txt); 
+      }
+      
+      .card { 
+        background: var(--panel); 
+        border: 1px solid var(--border); 
+        border-radius: 1rem; 
+        padding: 1.5rem; 
+        margin-bottom: 1.5rem;
+        transition: all 0.3s ease;
+      }
+      
+      .card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      }
+      
+      .btn { 
+        border-radius: 0.5rem; 
+        padding: 0.5rem 1rem; 
+        font-weight: 500;
+        transition: all 0.2s ease;
+      }
+      
+      .btn-primary { 
+        background: var(--brand); 
+        border-color: var(--brand); 
+        color: white;
+      }
+      
+      .btn-primary:hover { 
+        background: var(--accent); 
+        border-color: var(--accent); 
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      }
+      
+      .btn-outline-secondary { 
+        color: var(--muted); 
+        border-color: var(--muted); 
+      }
+      
+      .btn-outline-secondary:hover { 
+        background: var(--muted); 
+        border-color: var(--muted); 
+        color: white;
+      }
+      
+      /* Theme Toggle Button */
+      #themeToggle { 
+        all: unset; 
+        cursor: pointer; 
+        padding: 0.5rem; 
+        border-radius: 0.5rem; 
+        display: flex; 
+        align-items: center; 
+        justify-content: center; 
+        background: var(--hover); 
+        border: 1px solid transparent; 
+      }
+      
+      #themeToggle:hover { 
+        background: var(--hover); 
+        border-color: var(--brand); 
+      }
+      
+      .text-muted { color: var(--muted) !important; }
+      p, div, span, td, th, label, h1, h2, h3, h4, h5, h6 { color: var(--txt); }
+    </style>
+  </head>
+  <body>
+    <div class="container-lg">
+      <div class="header">
+        <h1>🏥 Healthcheck</h1>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <button id="themeToggle" title="Dark/Light Mode Toggle">
+            <span id="themeIcon" style="font-size: 1.2rem;">🌙</span>
+          </button>
+          <a href="/" class="btn btn-outline-secondary">← Ana Sayfa</a>
+        </div>
+      </div>
+      
+      <div class="row">
+        <div class="col-md-12">
+          <div class="card">
+            <h3>Healthcheck Modülü</h3>
+            <p class="text-muted">
+              Bu bölümde sunucu sağlık kontrolleri ve izleme işlemlerini gerçekleştirebileceksiniz.
+              Aşağıdaki özellikleri yakında kullanıma açılacaktır:
+            </p>
+            <ul class="text-muted">
+              <li>PostgreSQL sunucu sağlık kontrolü</li>
+              <li>Sistem kaynak kullanımı izleme</li>
+              <li>Disk doluluk oranları takibi</li>
+              <li>Veritabanı bağlantı testleri</li>
+              <li>Replication lag kontrolü</li>
+              <li>Backup durumu kontrolü</li>
+              <li>Otomatik periyodik sağlık raporları</li>
+            </ul>
+            <div class="alert alert-info mt-3" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 0.5rem; padding: 1rem;">
+              <strong>🚧 Geliştirme Aşamasında</strong><br>
+              Bu özellik aktif olarak geliştirilmektedir. Yakında kullanıma açılacaktır.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+      // Theme management
+      function initTheme() {
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+        const themeIcon = document.getElementById('themeIcon');
+        if (themeIcon) {
+          themeIcon.textContent = savedTheme === 'dark' ? '🌙' : '☀️';
+        }
+      }
+
+      function toggleTheme() {
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        
+        document.documentElement.setAttribute('data-theme', newTheme);
+        
+        const themeIcon = document.getElementById('themeIcon');
+        if (themeIcon) {
+          themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+        }
+        
+        localStorage.setItem('theme', newTheme);
+      }
+
+      // Initialize theme on page load
+      document.addEventListener('DOMContentLoaded', function() {
+        initTheme();
+        
+        const themeToggle = document.getElementById('themeToggle');
+        if (themeToggle) {
+          themeToggle.addEventListener('click', toggleTheme);
+        }
+      });
+    </script>
+    
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>
@@ -4588,6 +4873,15 @@ def envanter():
                 'Envanter ana sayfasını ziyaret etti', 'envanter')
     return render_template_string(TEMPLATE_ENVANTER, theme_script=THEME_SCRIPT)
 
+# Healthcheck sayfası
+@app.route("/healthcheck")
+@require_auth("multiquery")
+def healthcheck():
+    # Healthcheck sayfası ziyaret edildiğini logla
+    log_activity(session['user_id'], session['username'], 'healthcheck_access', 
+                'Healthcheck sayfasını ziyaret etti', 'healthcheck')
+    return render_template_string(TEMPLATE_HEALTHCHECK)
+
 # Manuel sunucu ekleme sayfası
 @app.route("/manuel-sunucu-ekle", methods=["GET", "POST"])
 @require_auth("multiquery")
@@ -4642,6 +4936,7 @@ def envantere_ekle():
             'ip': request.form.get('ip', ''),
             'ssh_port': request.form.get('ssh_port', 22),
             'ssh_user': request.form.get('ssh_user', ''),
+            'ssh_password': request.form.get('ssh_password', ''),
             'os_info': request.form.get('os_info', 'N/A'),
             'cpu_info': request.form.get('cpu_info', 'N/A'),
             'cpu_cores': request.form.get('cpu_cores', 'N/A'),
