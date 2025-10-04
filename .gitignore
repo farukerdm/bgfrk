@@ -26,6 +26,9 @@ venv/
 ENV/
 env/
 
+# Keep main code file
+!.venv/anasayfa.py
+
 # IDE
 .vscode/
 .idea/
