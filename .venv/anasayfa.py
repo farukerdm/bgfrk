@@ -186,7 +186,7 @@ def init_db() -> None:
         admin_id = cur.lastrowid
         
         # Admin'e tüm sayfalara erişim ver
-        pages = ['multiquery', 'pg_install', 'admin_panel', 'faydali_linkler', 'view_logs']
+        pages = ['multiquery', 'pg_install', 'admin_panel', 'faydali_linkler', 'view_logs', 'envanter']
         for page in pages:
             con.execute("""
                 INSERT INTO user_permissions (user_id, page_name, can_access) 
@@ -453,6 +453,24 @@ def log_activity(user_id: int, username: str, action: str, details: str = "", pa
     # User agent'ı al
     user_agent = request.headers.get('User-Agent', 'unknown') if request else "unknown"
     
+    # Sayfa isimlerini Türkçe'ye çevir
+    page_names_tr = {
+        'multiquery': 'Multiquery (SQL Sorgu Konsolu)',
+        'pg_install': 'PostgreSQL Kurulum',
+        'admin_panel': 'Admin Panel (Kullanıcı Yönetimi)',
+        'faydali_linkler': 'Faydalı Linkler',
+        'view_logs': 'Aktivite Logları',
+        'envanter': 'Sunucu Envanteri',
+        'manuel-sunucu-ekle': 'Manuel Sunucu Ekleme',
+        'toplu-sunucu-ekle': 'Toplu Sunucu Ekleme',
+        'sunuculari-listele': 'Sunucuları Listele',
+        'sunucu-excel-export': 'Excel Export',
+        'envantere-ekle': 'Envantere Ekleme',
+        'landing': 'Ana Sayfa',
+        'login': 'Giriş Sayfası',
+        'logout': 'Çıkış İşlemi'
+    }
+    
     # Action'ları Türkçe ve detaylı hale getir
     action_messages = {
         'login': '🔐 Giriş yaptı',
@@ -477,16 +495,39 @@ def log_activity(user_id: int, username: str, action: str, details: str = "", pa
         'query_error': '❌ SQL sorgu hatası',
         'query_success': '✅ SQL sorgu başarılı',
         'system_start': '🚀 Sistem başlatıldı',
-        'system_stop': '⏹️ Sistem durduruldu'
+        'system_stop': '⏹️ Sistem durduruldu',
+        'envanter_access': '📋 Envanter sayfasını ziyaret etti',
+        'manuel_server_add': '🖥️ Manuel sunucu ekleme sayfasını ziyaret etti',
+        'bulk_server_add': '📊 Toplu sunucu ekleme sayfasını ziyaret etti',
+        'server_list': '📋 Sunucu listesi sayfasını ziyaret etti',
+        'server_scan': '🔍 Sunucu tarama işlemi yaptı',
+        'server_add_to_inventory': '📋 Sunucuyu envantere ekledi',
+        'excel_export': '📊 Excel export işlemi yaptı',
+        'bulk_server_scan': '🔍 Toplu sunucu tarama işlemi yaptı',
+        'form_submit': '📝 Form gönderdi',
+        'file_upload': '📁 Dosya yükledi',
+        'data_export': '📊 Veri export etti',
+        'data_import': '📥 Veri import etti',
+        'search_performed': '🔍 Arama yaptı',
+        'filter_applied': '🔍 Filtre uyguladı',
+        'settings_changed': '⚙️ Ayar değiştirdi',
+        'theme_changed': '🎨 Tema değiştirdi'
     }
     
-    # Detaylı mesaj oluştur
-    action_message = action_messages.get(action, action)
+    # Sayfa ziyaret etme durumunda özel mesaj oluştur
+    if action == 'page_access' and page_name:
+        page_display_name = page_names_tr.get(page_name, page_name)
+        action_message = f"📱 {page_display_name} sayfasını ziyaret etti"
+    else:
+        action_message = action_messages.get(action, action)
     
-    # Detaylı log mesajı
+    # Detaylı log mesajı oluştur
     log_details = f"{action_message}"
     if details:
         log_details += f" - {details}"
+    elif page_name and action != 'page_access':
+        page_display_name = page_names_tr.get(page_name, page_name)
+        log_details += f" - Sayfa: {page_display_name}"
     
     # IP adresini kısalt (güvenlik için)
     short_ip = ip_address[:15] + "..." if len(ip_address) > 15 else ip_address
@@ -498,7 +539,7 @@ def log_activity(user_id: int, username: str, action: str, details: str = "", pa
         db_execute("""
             INSERT INTO activity_logs (user_id, username, action, details, page_name, ip_address, user_agent, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """, [user_id, username, action_message, details, page_name, short_ip, short_ua])
+        """, [user_id, username, log_details, details, page_name, short_ip, short_ua])
     except Exception as e:
         print(f"Log yazma hatası: {e}")
 
@@ -523,9 +564,12 @@ def log_sql_query(user_id: int, username: str, sql_query: str, servers: list, re
     error_count = len(results) - success_count
     
     # Detaylı mesaj oluştur
-    details = f"Sorgu: '{query_preview}' | Sunucular: {server_list} | Başarılı: {success_count}/{len(results)} | Toplam satır: {total_rows}"
+    details = f"Sunucular: {server_list} | Başarılı: {success_count}/{len(results)} | Toplam satır: {total_rows}"
     if error_count > 0:
         details += f" | Hatalı: {error_count}"
+    
+    # Action mesajını sorgu ile birleştir
+    action_message = f"📊 Şu sorguyu çalıştırdı: '{query_preview}'"
     
     # IP ve User Agent'ı kısalt
     short_ip = ip_address[:15] + "..." if len(ip_address) > 15 else ip_address
@@ -535,7 +579,7 @@ def log_sql_query(user_id: int, username: str, sql_query: str, servers: list, re
         db_execute("""
             INSERT INTO activity_logs (user_id, username, action, details, page_name, ip_address, user_agent, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """, [user_id, username, "📊 SQL sorgusu çalıştırdı", details, page_name, short_ip, short_ua])
+        """, [user_id, username, action_message, details, page_name, short_ip, short_ua])
     except Exception as e:
         print(f"SQL log yazma hatası: {e}")
 
@@ -914,23 +958,46 @@ def run_sql_on_server(server: Dict[str, Any], sql: str) -> Dict[str, Any]:
 # -------------------- TEMA SCRIPTİ --------------------
 THEME_SCRIPT = r"""
 <script>
-(function(){
-  const saved = localStorage.getItem('theme');
+// Dark Mode Toggle
+function initTheme() {
+  const savedTheme = localStorage.getItem('theme') || 'dark';
   const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = saved || (prefersDark ? 'dark' : 'light');
-  document.documentElement.setAttribute('data-bs-theme', theme);
-  window.addEventListener('DOMContentLoaded', function(){
-    const toggle = document.getElementById('themeToggle');
-    if (toggle){
-      toggle.checked = (document.documentElement.getAttribute('data-bs-theme') === 'dark');
-      toggle.addEventListener('change', function(){
-        const t = this.checked ? 'dark' : 'light';
-        document.documentElement.setAttribute('data-bs-theme', t);
-        localStorage.setItem('theme', t);
-      });
-    }
-  });
-})();
+  const theme = savedTheme === 'dark' || (savedTheme === 'auto' && prefersDark) ? 'dark' : 'light';
+  
+  document.documentElement.setAttribute('data-theme', theme);
+  
+  const themeIcon = document.getElementById('themeIcon');
+  if (themeIcon) {
+    themeIcon.textContent = theme === 'dark' ? '🌙' : '☀️';
+  }
+  
+  localStorage.setItem('theme', theme);
+}
+
+function toggleTheme() {
+  const currentTheme = document.documentElement.getAttribute('data-theme');
+  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  
+  document.documentElement.setAttribute('data-theme', newTheme);
+  
+  const themeIcon = document.getElementById('themeIcon');
+  if (themeIcon) {
+    themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+  }
+  
+  localStorage.setItem('theme', newTheme);
+}
+
+// Initialize theme on page load
+document.addEventListener('DOMContentLoaded', function() {
+  initTheme();
+
+  // Add click event to theme toggle
+  const themeToggle = document.getElementById('themeToggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', toggleTheme);
+  }
+});
 </script>
 """
 
@@ -1175,6 +1242,8 @@ TEMPLATE_LOGIN = """
       themeToggle.addEventListener('click', toggleTheme);
     }
   </script>
+  
+  {{ theme_script|safe }}
 </body>
 </html>
 """
@@ -1618,6 +1687,10 @@ TEMPLATE_ADMIN = """
               <div class="checkbox-item">
                 <input type="checkbox" name="view_logs" id="perm_view_logs">
                 <label for="perm_view_logs">Log Görüntüleme</label>
+              </div>
+              <div class="checkbox-item">
+                <input type="checkbox" name="envanter" id="perm_envanter">
+                <label for="perm_envanter">Sunucu Envanteri</label>
               </div>
               {% if session.get('is_admin') %}
               <div class="checkbox-item">
@@ -2181,6 +2254,14 @@ TEMPLATE_LANDING = r"""<!doctype html>
     [data-theme="dark"] #themeToggle:hover{border-color:#50b0ff;}
     [data-theme="light"] #themeToggle:hover{border-color:#3b82f6;}
     
+    /* Global text color fixes for better visibility */
+    p, div, span, td, th, label, h1, h2, h3, h4, h5, h6 { color: var(--txt); }
+    .text-muted { color: var(--muted) !important; }
+    .alert { color: var(--txt); }
+    .btn { color: white; }
+    .btn-outline-secondary { color: var(--muted); border-color: var(--muted); }
+    .btn-outline-secondary:hover { background: var(--muted); border-color: var(--muted); color: white; }
+    
   </style>
 </head>
 <body>
@@ -2552,6 +2633,8 @@ TEMPLATE_LANDING = r"""<!doctype html>
     }
 
   </script>
+  
+  {{ theme_script|safe }}
 </body>
 </html>
 """
@@ -2651,6 +2734,31 @@ TEMPLATE_INDEX = r"""
       #themeToggle:hover { background: var(--hover); border-color: var(--brand); }
       [data-theme="dark"] #themeToggle:hover { border-color: #50b0ff; }
       [data-theme="light"] #themeToggle:hover { border-color: #3b82f6; }
+      
+      /* Multiquery specific fixes */
+      .card-header { background: var(--hover); color: var(--txt); border-bottom: 1px solid; }
+      [data-theme="dark"] .card-header { border-color: #243044; }
+      [data-theme="light"] .card-header { border-color: #e2e8f0; }
+      
+      .form-label { color: var(--txt); font-weight: 600; }
+      
+      /* Table fixes */
+      .table th { background: var(--hover); color: var(--txt); border-color: var(--hover); }
+      .table td { color: var(--txt); border-color: var(--hover); }
+      
+      /* Badge fixes */
+      .badge { background: var(--hover); color: var(--txt); }
+      .badge-wrap .badge { background: var(--hover); color: var(--txt); border: 1px solid var(--hover); }
+      
+      /* Code fixes */
+      code { background: var(--hover); color: var(--txt); padding: 0.25rem 0.5rem; border-radius: 0.25rem; }
+      
+      /* Modal title fixes */
+      .modal-title { color: var(--txt); }
+      
+      /* Text color fixes */
+      p, div, span, td, th, label, h1, h2, h3, h4, h5, h6 { color: var(--txt); }
+      .text-muted { color: var(--muted) !important; }
     </style>
   </head>
   <body>
@@ -3070,6 +3178,44 @@ TEMPLATE_INDEX = r"""
         // Genel PostgreSQL bilgi sorgusu
         return '-- PostgreSQL Sistem Bilgileri\nSELECT \'PostgreSQL Version\' as bilgi, version() as deger\nUNION ALL\nSELECT \'Current Database\' as bilgi, current_database() as deger\nUNION ALL\nSELECT \'Current User\' as bilgi, current_user as deger\nUNION ALL\nSELECT \'Server IP\' as bilgi, COALESCE(inet_server_addr()::text, \'Local\') as deger;';
       }
+      
+      // Theme Toggle Functions
+      function initTheme() {
+        const savedTheme = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+        
+        document.documentElement.setAttribute('data-theme', theme);
+        
+        const themeIcon = document.getElementById('themeIcon');
+        if (themeIcon) {
+          themeIcon.textContent = theme === 'dark' ? '☀️' : '🌙';
+        }
+      }
+      
+      function toggleTheme() {
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        
+        document.documentElement.setAttribute('data-theme', newTheme);
+        localStorage.setItem('theme', newTheme);
+        
+        const themeIcon = document.getElementById('themeIcon');
+        if (themeIcon) {
+          themeIcon.textContent = newTheme === 'dark' ? '☀️' : '🌙';
+        }
+      }
+      
+      // Initialize theme on page load
+      document.addEventListener('DOMContentLoaded', function() {
+        initTheme();
+        
+        // Add click event to theme toggle
+        const themeToggle = document.getElementById('themeToggle');
+        if (themeToggle) {
+          themeToggle.addEventListener('click', toggleTheme);
+        }
+      });
       </script>
     </div>
     
@@ -3082,7 +3228,7 @@ TEMPLATE_INDEX = r"""
         </div>
         
         <!-- Geliştirme Aşaması Uyarısı -->
-        <div style="background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 12px; border-radius: 4px; margin-bottom: 20px;">
+        <div style="background: var(--hover); border: 1px solid var(--muted); color: var(--txt); padding: 12px; border-radius: 4px; margin-bottom: 20px;">
           <div style="display: flex; align-items: center; gap: 8px;">
             <span style="font-size: 20px;">⚠️</span>
             <div>
@@ -4437,6 +4583,9 @@ def multiquery():
 @app.route("/envanter")
 @require_auth("multiquery")
 def envanter():
+    # Envanter sayfası ziyaret edildiğini logla
+    log_activity(session['user_id'], session['username'], 'envanter_access', 
+                'Envanter ana sayfasını ziyaret etti', 'envanter')
     return render_template_string(TEMPLATE_ENVANTER, theme_script=THEME_SCRIPT)
 
 # Manuel sunucu ekleme sayfası
@@ -4454,16 +4603,31 @@ def manuel_sunucu_ekle():
             flash("Tüm alanları doldurunuz.", "danger")
             return render_template_string(TEMPLATE_MANUEL_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
         
+        # Manuel sunucu ekleme formu gönderildiğini logla
+        log_activity(session['user_id'], session['username'], 'form_submit', 
+                    f'Manuel sunucu ekleme formu gönderildi - Sunucu: {hostname} ({ip})', 'manuel-sunucu-ekle')
+        
         # SSH bağlantısı yaparak sunucu bilgilerini topla
         try:
             server_info = collect_server_info(hostname, ip, ssh_port, ssh_user, password)
+            
+            # Sunucu tarama işlemi başarılı
+            log_activity(session['user_id'], session['username'], 'server_scan', 
+                        f'Sunucu tarama başarılı - {hostname} ({ip}) - OS: {server_info.get("os_info", "N/A")} - PostgreSQL: {server_info.get("postgresql_status", "Yok")}', 'manuel-sunucu-ekle')
+            
             return render_template_string(TEMPLATE_SUNUCU_BILGILERI, 
                                         server_info=server_info, 
                                         theme_script=THEME_SCRIPT)
         except Exception as e:
+            # Sunucu tarama hatası
+            log_activity(session['user_id'], session['username'], 'server_scan', 
+                        f'Sunucu tarama hatası - {hostname} ({ip}) - Hata: {str(e)}', 'manuel-sunucu-ekle')
             flash(f"Sunucuya bağlanırken hata oluştu: {str(e)}", "danger")
             return render_template_string(TEMPLATE_MANUEL_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
     
+    # Manuel sunucu ekleme sayfası ziyaret edildiğini logla
+    log_activity(session['user_id'], session['username'], 'manuel_server_add', 
+                'Manuel sunucu ekleme sayfasını ziyaret etti', 'manuel-sunucu-ekle')
     return render_template_string(TEMPLATE_MANUEL_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
 
 # Envantere ekleme route'u
@@ -4501,11 +4665,20 @@ def envantere_ekle():
         success, message = save_sunucu_bilgileri(server_info)
         
         if success:
+            # Envantere ekleme başarılı
+            log_activity(session['user_id'], session['username'], 'server_add_to_inventory', 
+                        f'Sunucu envantere {message} - {server_info.get("hostname", "N/A")} ({server_info.get("ip", "N/A")})', 'envantere-ekle')
             flash(f"Sunucu başarıyla {message}!", "success")
         else:
+            # Envantere ekleme başarısız
+            log_activity(session['user_id'], session['username'], 'server_add_to_inventory', 
+                        f'Envantere ekleme başarısız: {message} - {server_info.get("hostname", "N/A")} ({server_info.get("ip", "N/A")})', 'envantere-ekle')
             flash(f"Sunucu kaydedilemedi: {message}", "danger")
             
     except Exception as e:
+        # Envantere ekleme hatası
+        log_activity(session['user_id'], session['username'], 'server_add_to_inventory', 
+                    f'Envantere ekleme hatası: {str(e)} - {server_info.get("hostname", "N/A")} ({server_info.get("ip", "N/A")})', 'envantere-ekle')
         flash(f"Envantere ekleme hatası: {str(e)}", "danger")
     
     return redirect(url_for("sunuculari_listele"))
@@ -4525,6 +4698,10 @@ def toplu_sunucu_ekle():
             flash("Tüm alanları doldurunuz.", "danger")
             return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
         
+        # Toplu sunucu ekleme formu gönderildiğini logla
+        log_activity(session['user_id'], session['username'], 'form_submit', 
+                    f'Toplu sunucu ekleme formu gönderildi - Excel dosyası: {excel_file.filename}', 'toplu-sunucu-ekle')
+        
         try:
             # Excel dosyasını oku
             import pandas as pd
@@ -4536,6 +4713,10 @@ def toplu_sunucu_ekle():
             if not server_names:
                 flash("Excel dosyasında sunucu ismi bulunamadı.", "danger")
                 return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+            
+            # Toplu sunucu tarama başladığını logla
+            log_activity(session['user_id'], session['username'], 'bulk_server_scan', 
+                        f'Toplu sunucu tarama başladı - {len(server_names)} sunucu - Excel: {excel_file.filename}', 'toplu-sunucu-ekle')
             
             # Her sunucu için bilgi topla
             results = []
@@ -4571,14 +4752,26 @@ def toplu_sunucu_ekle():
                         'error': str(e)
                     })
             
+            # Toplu sunucu tarama tamamlandığını logla
+            success_count = sum(1 for r in results if not r.get('error'))
+            error_count = len(results) - success_count
+            log_activity(session['user_id'], session['username'], 'bulk_server_scan', 
+                        f'Toplu sunucu tarama tamamlandı - Başarılı: {success_count}/{len(results)} - Hatalı: {error_count}', 'toplu-sunucu-ekle')
+            
             return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, 
                                         results=results, 
                                         theme_script=THEME_SCRIPT)
             
         except Exception as e:
+            # Toplu sunucu tarama hatası
+            log_activity(session['user_id'], session['username'], 'bulk_server_scan', 
+                        f'Toplu sunucu tarama hatası - Excel: {excel_file.filename} - Hata: {str(e)}', 'toplu-sunucu-ekle')
             flash(f"Excel dosyası işlenirken hata oluştu: {str(e)}", "danger")
             return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
     
+    # Toplu sunucu ekleme sayfası ziyaret edildiğini logla
+    log_activity(session['user_id'], session['username'], 'bulk_server_add', 
+                'Toplu sunucu ekleme sayfasını ziyaret etti', 'toplu-sunucu-ekle')
     return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
 
 # Sunucuları listeleme sayfası
@@ -4590,6 +4783,9 @@ def sunuculari_listele():
         cleaned_count = clean_duplicate_servers()
         if cleaned_count > 0:
             flash(f"{cleaned_count} duplicate kayıt temizlendi.", "info")
+            # Duplicate temizleme işlemini logla
+            log_activity(session['user_id'], session['username'], 'data_cleanup', 
+                        f'Duplicate kayıt temizleme - {cleaned_count} kayıt silindi', 'sunuculari-listele')
     except Exception as e:
         print(f"Duplicate temizleme hatası: {e}")
     
@@ -4607,6 +4803,10 @@ def sunuculari_listele():
                     server['disks'] = []
             except:
                 server['disks'] = []
+        
+        # Sunucu listesi sayfası ziyaret edildiğini logla
+        log_activity(session['user_id'], session['username'], 'server_list', 
+                    f'Sunucu listesi sayfasını ziyaret etti - {len(servers)} sunucu listelendi', 'sunuculari-listele')
         
         return render_template_string(TEMPLATE_SUNUCULARI_LISTELE, 
                                     servers=servers, 
@@ -4693,8 +4893,8 @@ def sunucu_excel_export():
         filename = f"sunucu_envanteri_{timestamp}.xlsx"
         
         # Log export işlemini kaydet
-        log_activity(session['user_id'], session['username'], 'export_servers', 
-                    f"Sunucu envanteri Excel export - {len(servers)} sunucu", 'sunuculari_listele')
+        log_activity(session['user_id'], session['username'], 'excel_export', 
+                    f"Sunucu envanteri Excel export - {len(servers)} sunucu", 'sunucu-excel-export')
         
         return send_file(
             output,
@@ -5171,6 +5371,7 @@ def admin_panel():
         'pg_install': {'name': 'PostgreSQL Installation', 'description': 'PostgreSQL kurulum sayfası'},
         'faydali_linkler': {'name': 'Faydalı Linkler', 'description': 'Faydalı linkler menüsü'},
         'view_logs': {'name': 'Log Görüntüleme', 'description': 'Aktivite loglarını görüntüleme'},
+        'envanter': {'name': 'Sunucu Envanteri', 'description': 'Sunucu envanter yönetimi'},
         'admin_panel': {'name': 'Admin Panel', 'description': 'Admin yönetim paneli'}
     }
     
@@ -5204,7 +5405,7 @@ def admin_add_user():
     
     # Seçilen yetkileri al (normal kullanıcı için)
     selected_permissions = []
-    permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs']
+    permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
     
     for page in permission_pages:
         if request.form.get(page):
@@ -5312,7 +5513,7 @@ def admin_edit_user(user_id):
                 db_execute("DELETE FROM user_permissions WHERE user_id = ?", [user_id])
                 
                 # Yeni yetkileri ekle (admin panel yetkisi hariç)
-                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs']
+                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
                 for page in permission_pages:
                     if request.form.get(page):
                         db_execute("""
@@ -5323,7 +5524,7 @@ def admin_edit_user(user_id):
             # Yetki değişikliklerini logla
             permission_changes = []
             if session.get('is_admin') and not user['is_admin']:
-                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs']
+                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
                 for page in permission_pages:
                     if request.form.get(page):
                         permission_changes.append(page)
@@ -5350,6 +5551,7 @@ def admin_edit_user(user_id):
         'pg_install': {'name': 'PostgreSQL Installation', 'description': 'PostgreSQL kurulum sayfası'},
         'faydali_linkler': {'name': 'Faydalı Linkler', 'description': 'Faydalı linkler menüsü'},
         'view_logs': {'name': 'Log Görüntüleme', 'description': 'Aktivite loglarını görüntüleme'},
+        'envanter': {'name': 'Sunucu Envanteri', 'description': 'Sunucu envanter yönetimi'},
         'admin_panel': {'name': 'Admin Panel', 'description': 'Admin yönetim paneli'}
     }
 
@@ -5596,6 +5798,7 @@ def admin_manage_permissions(user_id):
         'pg_install': {'name': 'PostgreSQL Installation', 'description': 'PostgreSQL kurulum sayfası'},
         'faydali_linkler': {'name': 'Faydalı Linkler', 'description': 'Faydalı linkler menüsü'},
         'view_logs': {'name': 'Log Görüntüleme', 'description': 'Aktivite loglarını görüntüleme'},
+        'envanter': {'name': 'Sunucu Envanteri', 'description': 'Sunucu envanter yönetimi'},
         'admin_panel': {'name': 'Admin Panel', 'description': 'Admin yönetim paneli'}
     }
     
