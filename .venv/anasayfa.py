@@ -72,11 +72,11 @@ try:
     
     import pstandaloneinstall
     PG_INSTALL_AVAILABLE = True
-    print(f"✅ PostgreSQL Installation modülü başarıyla yüklendi")
+    print("PostgreSQL Installation modulu basariyla yuklendi")
 except Exception as e:
     pstandaloneinstall = None
     PG_INSTALL_AVAILABLE = False
-    print(f"❌ PostgreSQL Installation modülü yüklenemedi: {e}")
+    print(f"PostgreSQL Installation modulu yuklenemedi: {e}")
     print(f"   Hata detayı: {type(e).__name__}: {str(e)}")
     print(f"   Mevcut dizin: {os.getcwd()}")
     print(f"   Python path: {sys.path[:3]}")
@@ -3016,8 +3016,8 @@ TEMPLATE_ENVANTER = r"""
           
           <div class="card">
             <h3>📦 Toplu Sunucu Ekle</h3>
-            <p>Birden fazla PostgreSQL sunucusunu CSV dosyası veya toplu giriş ile ekleyin.</p>
-            <a href="#" class="btn btn-warning" onclick="alert('Toplu sunucu ekleme özelliği geliştirme aşamasındadır!')">
+            <p>Excel dosyasından sunucu isimlerini alıp SSH ile otomatik bilgi toplama.</p>
+            <a href="/toplu-sunucu-ekle" class="btn btn-warning">
               <span class="btn-icon">📦</span>
               Toplu Sunucu Ekle
             </a>
