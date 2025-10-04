@@ -218,7 +218,6 @@ def db_execute(sql: str, args: Tuple = ()) -> int:
         con.commit()
         return cur.rowcount
     except sqlite3.ProgrammingError:
-        # Connection might be closed, try to get a fresh connection
         with _conn_lock:
             global _meta_conn_cache
             _meta_conn_cache = None
@@ -226,6 +225,185 @@ def db_execute(sql: str, args: Tuple = ()) -> int:
             cur = con.execute(sql, args)
             con.commit()
             return cur.rowcount
+
+def init_sunucu_envanteri_table():
+    """Sunucu envanteri tablosunu oluştur"""
+    try:
+        db_execute("""
+            CREATE TABLE IF NOT EXISTS sunucu_envanteri (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hostname TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                ssh_port INTEGER DEFAULT 22,
+                ssh_user TEXT,
+                os_info TEXT,
+                cpu_info TEXT,
+                cpu_cores TEXT,
+                ram_total TEXT,
+                disks TEXT,
+                uptime TEXT,
+                postgresql_status TEXT,
+                postgresql_version TEXT,
+                postgresql_replication TEXT,
+                pgbackrest_status TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    except Exception as e:
+        print(f"Sunucu envanteri tablosu oluşturulurken hata: {e}")
+
+def save_sunucu_bilgileri(server_info):
+    """Sunucu bilgilerini veritabanına kaydet (varsa güncelle, yoksa ekle)"""
+    try:
+        # Disks bilgisini JSON string'e çevir
+        import json
+        disks_json = json.dumps(server_info.get('disks', []))
+        
+        # Önce aynı IP'ye sahip sunucu var mı kontrol et (sadece IP bazında duplicate kontrol)
+        existing_server = db_query("""
+            SELECT * FROM sunucu_envanteri 
+            WHERE ip = ?
+        """, (server_info.get('ip', ''),))
+        
+        if existing_server:
+            existing = existing_server[0]
+            
+            # Eksik bilgileri kontrol et ve değişiklik var mı bak
+            has_changes = False
+            changes = []
+            
+            # Her alanı kontrol et
+            fields_to_check = {
+                'os_info': server_info.get('os_info', 'N/A'),
+                'cpu_info': server_info.get('cpu_info', 'N/A'),
+                'cpu_cores': server_info.get('cpu_cores', 'N/A'),
+                'ram_total': server_info.get('ram_total', 'N/A'),
+                'disks': disks_json,
+                'uptime': server_info.get('uptime', 'N/A'),
+                'postgresql_status': server_info.get('postgresql_status', 'Yok'),
+                'postgresql_version': server_info.get('postgresql_version', 'N/A'),
+                'postgresql_replication': server_info.get('postgresql_replication', 'N/A'),
+                'pgbackrest_status': server_info.get('pgbackrest_status', 'Yok')
+            }
+            
+            for field, new_value in fields_to_check.items():
+                old_value = existing.get(field, 'N/A')
+                
+                # Eksik bilgi kontrolü (N/A veya boş ise eksik kabul et)
+                if old_value in ['N/A', '', None] and new_value not in ['N/A', '', None]:
+                    has_changes = True
+                    changes.append(f"{field}: eksik bilgi eklendi")
+                # Değişiklik kontrolü
+                elif old_value != new_value and new_value not in ['N/A', '', None]:
+                    has_changes = True
+                    changes.append(f"{field}: güncellendi")
+            
+            if has_changes:
+                # Değişiklik varsa güncelle
+                db_execute("""
+                    UPDATE sunucu_envanteri SET
+                        hostname = ?, ip = ?, ssh_port = ?, ssh_user = ?, 
+                        os_info = ?, cpu_info = ?, cpu_cores = ?, ram_total = ?, 
+                        disks = ?, uptime = ?, postgresql_status = ?, 
+                        postgresql_version = ?, postgresql_replication = ?, 
+                        pgbackrest_status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    server_info.get('hostname', ''),
+                    server_info.get('ip', ''),
+                    server_info.get('ssh_port', 22),
+                    server_info.get('ssh_user', ''),
+                    server_info.get('os_info', 'N/A'),
+                    server_info.get('cpu_info', 'N/A'),
+                    server_info.get('cpu_cores', 'N/A'),
+                    server_info.get('ram_total', 'N/A'),
+                    disks_json,
+                    server_info.get('uptime', 'N/A'),
+                    server_info.get('postgresql_status', 'Yok'),
+                    server_info.get('postgresql_version', 'N/A'),
+                    server_info.get('postgresql_replication', 'N/A'),
+                    server_info.get('pgbackrest_status', 'Yok'),
+                    existing['id']
+                ))
+                change_details = ", ".join(changes[:3])  # İlk 3 değişikliği göster
+                if len(changes) > 3:
+                    change_details += f" ve {len(changes)-3} alan daha"
+                return True, f"güncellendi ({change_details})"
+            else:
+                # Değişiklik yoksa duplicate uyarısı
+                return False, "Bu kayıt zaten mevcut ve değiştirilecek bilgi yok (duplicate kayıt)"
+        else:
+            # Yoksa ekle
+            db_execute("""
+                INSERT INTO sunucu_envanteri 
+                (hostname, ip, ssh_port, ssh_user, os_info, cpu_info, cpu_cores, 
+                 ram_total, disks, uptime, postgresql_status, postgresql_version, 
+                 postgresql_replication, pgbackrest_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                server_info.get('hostname', ''),
+                server_info.get('ip', ''),
+                server_info.get('ssh_port', 22),
+                server_info.get('ssh_user', ''),
+                server_info.get('os_info', 'N/A'),
+                server_info.get('cpu_info', 'N/A'),
+                server_info.get('cpu_cores', 'N/A'),
+                server_info.get('ram_total', 'N/A'),
+                disks_json,
+                server_info.get('uptime', 'N/A'),
+                server_info.get('postgresql_status', 'Yok'),
+                server_info.get('postgresql_version', 'N/A'),
+                server_info.get('postgresql_replication', 'N/A'),
+                server_info.get('pgbackrest_status', 'Yok')
+            ))
+            return True, "eklendi"
+    except Exception as e:
+        print(f"Sunucu bilgileri kaydedilirken hata: {e}")
+        return False, str(e)
+
+def clean_duplicate_servers():
+    """Duplicate sunucu kayıtlarını temizle (IP bazında)"""
+    try:
+        # Aynı IP'ye sahip duplicate kayıtları bul
+        duplicates = db_query("""
+            SELECT ip, COUNT(*) as count, GROUP_CONCAT(id) as ids, GROUP_CONCAT(hostname) as hostnames
+            FROM sunucu_envanteri 
+            GROUP BY ip 
+            HAVING COUNT(*) > 1
+        """)
+        
+        cleaned_count = 0
+        for duplicate in duplicates:
+            ids = duplicate['ids'].split(',')
+            ids = [int(id.strip()) for id in ids]
+            
+            # En son güncellenen kaydı tut, diğerlerini sil
+            keep_id = None
+            latest_updated = None
+            
+            for server_id in ids:
+                server_info = db_query("SELECT id, updated_at FROM sunucu_envanteri WHERE id = ?", (server_id,))
+                if server_info:
+                    updated_at = server_info[0]['updated_at']
+                    if latest_updated is None or updated_at > latest_updated:
+                        latest_updated = updated_at
+                        keep_id = server_id
+            
+            # Diğer duplicate kayıtları sil
+            for server_id in ids:
+                if server_id != keep_id:
+                    db_execute("DELETE FROM sunucu_envanteri WHERE id = ?", (server_id,))
+                    cleaned_count += 1
+            
+            hostnames = duplicate['hostnames'].split(',')
+            hostnames = [h.strip() for h in hostnames]
+            print(f"Duplicate temizlendi: IP {duplicate['ip']} - Hostname'ler: {', '.join(hostnames)} - {len(ids)-1} kayıt silindi")
+        
+        return cleaned_count
+    except Exception as e:
+        print(f"Duplicate temizleme hatası: {e}")
+        return 0
 
 # Kimlik doğrulama fonksiyonları
 def hash_password(password: str) -> str:
@@ -447,7 +625,9 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         'ip': ip,
         'ssh_port': ssh_port,
         'ssh_user': ssh_user,
+        'os_info': 'N/A',
         'cpu_info': 'N/A',
+        'cpu_cores': 'N/A',
         'ram_total': 'N/A',
         'disks': 'N/A',
         'uptime': 'N/A',
@@ -463,12 +643,34 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(hostname=ip, port=int(ssh_port), username=ssh_user, password=password, timeout=10)
         
+        # İşletim sistemi bilgisi
+        try:
+            stdin, stdout, stderr = ssh.exec_command("cat /etc/os-release | grep PRETTY_NAME | cut -d'=' -f2 | tr -d '\"'")
+            os_info = stdout.read().decode().strip()
+            if not os_info:
+                # Alternatif yöntem
+                stdin, stdout, stderr = ssh.exec_command("uname -a")
+                os_info = stdout.read().decode().strip()
+            if os_info:
+                server_info['os_info'] = os_info
+        except:
+            pass
+        
         # CPU bilgisi
         try:
             stdin, stdout, stderr = ssh.exec_command("cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d':' -f2 | xargs")
             cpu_info = stdout.read().decode().strip()
             if cpu_info:
                 server_info['cpu_info'] = cpu_info
+        except:
+            pass
+        
+        # CPU core sayısı
+        try:
+            stdin, stdout, stderr = ssh.exec_command("nproc")
+            cpu_cores = stdout.read().decode().strip()
+            if cpu_cores:
+                server_info['cpu_cores'] = f"{cpu_cores} cores"
         except:
             pass
         
@@ -552,44 +754,65 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
             if pg_status and ('active' in pg_status.lower() or 'running' in pg_status.lower() or pg_status == 'active'):
                 server_info['postgresql_status'] = 'Var'
                 
-                # PostgreSQL versiyonu - birden fazla yöntem dene
+                # PostgreSQL server versiyonu - birden fazla yöntem dene
                 try:
-                    # Yöntem 1: psql ile version sorgusu
-                    stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -c 'SELECT version();' 2>/dev/null | head -1")
+                    # Yöntem 1: PostgreSQL server versiyonu (en güvenilir)
+                    stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -c 'SELECT version();' 2>/dev/null | grep PostgreSQL")
                     pg_version = stdout.read().decode().strip()
                     
-                    # Yöntem 2: Eğer yukarısı çalışmazsa, postgres --version
+                    # Yöntem 2: Eğer yukarısı çalışmazsa, postgres server binary versiyonu
                     if not pg_version or 'PostgreSQL' not in pg_version:
                         stdin, stdout, stderr = ssh.exec_command("sudo -u postgres postgres --version 2>/dev/null")
                         pg_version = stdout.read().decode().strip()
                     
-                    # Yöntem 3: Eğer hala çalışmazsa, systemctl ile version bilgisi
+                    # Yöntem 3: Eğer hala çalışmazsa, pg_config ile versiyon
+                    if not pg_version or 'PostgreSQL' not in pg_version:
+                        stdin, stdout, stderr = ssh.exec_command("pg_config --version 2>/dev/null")
+                        pg_version = stdout.read().decode().strip()
+                        if pg_version:
+                            pg_version = f"PostgreSQL {pg_version}"
+                    
+                    # Yöntem 4: systemctl ile servis versiyonu
                     if not pg_version or 'PostgreSQL' not in pg_version:
                         stdin, stdout, stderr = ssh.exec_command("systemctl show postgresql -p Version 2>/dev/null | cut -d'=' -f2")
                         pg_version = stdout.read().decode().strip()
                         if pg_version:
                             pg_version = f"PostgreSQL {pg_version}"
                     
-                    # Yöntem 4: rpm/dpkg ile kurulu paket versiyonu
+                    # Yöntem 5: paket yöneticisi ile kurulu server versiyonu
                     if not pg_version or 'PostgreSQL' not in pg_version:
                         stdin, stdout, stderr = ssh.exec_command("rpm -q postgresql-server 2>/dev/null | head -1")
                         pg_version = stdout.read().decode().strip()
                         if not pg_version:
-                            stdin, stdout, stderr = ssh.exec_command("dpkg -l | grep postgresql-server | head -1")
+                            stdin, stdout, stderr = ssh.exec_command("dpkg -l | grep '^ii.*postgresql-server' | head -1")
                             pg_version = stdout.read().decode().strip()
                     
-                    # Yöntem 5: Son çare olarak basit psql versiyonu
+                    # Yöntem 6: PostgreSQL data directory'den versiyon bilgisi
                     if not pg_version or 'PostgreSQL' not in pg_version:
-                        stdin, stdout, stderr = ssh.exec_command("psql --version 2>/dev/null")
+                        stdin, stdout, stderr = ssh.exec_command("find /var/lib/postgresql -name PG_VERSION 2>/dev/null | head -1 | xargs cat")
+                        pg_version_raw = stdout.read().decode().strip()
+                        if pg_version_raw:
+                            pg_version = f"PostgreSQL {pg_version_raw}"
+                    
+                    # Yöntem 7: Son çare - psql client versiyonu (server ile aynı olabilir)
+                    if not pg_version or 'PostgreSQL' not in pg_version:
+                        stdin, stdout, stderr = ssh.exec_command("psql --version 2>/dev/null | grep PostgreSQL")
                         pg_version = stdout.read().decode().strip()
                     
-                    if pg_version and pg_version != 'N/A':
-                        server_info['postgresql_version'] = pg_version
+                    # Versiyon bilgisini temizle ve sadece PostgreSQL server versiyonunu göster
+                    if pg_version and 'PostgreSQL' in pg_version:
+                        # Sadece PostgreSQL versiyon numarasını al
+                        import re
+                        version_match = re.search(r'PostgreSQL (\d+\.\d+)', pg_version)
+                        if version_match:
+                            server_info['postgresql_version'] = f"PostgreSQL {version_match.group(1)}"
+                        else:
+                            server_info['postgresql_version'] = pg_version
                     else:
-                        server_info['postgresql_version'] = 'PostgreSQL aktif (versiyon bilgisi alınamadı)'
+                        server_info['postgresql_version'] = 'PostgreSQL aktif (server versiyonu alınamadı)'
                         
                 except Exception as e:
-                    server_info['postgresql_version'] = 'PostgreSQL aktif (versiyon bilgisi alınamadı)'
+                    server_info['postgresql_version'] = 'PostgreSQL aktif (server versiyonu alınamadı)'
                 
                 # Replication durumu
                 try:
@@ -2999,7 +3222,7 @@ TEMPLATE_ENVANTER = r"""
           <div class="card">
             <h3>📊 Sunucuları Listele</h3>
             <p>Mevcut kayıtlı PostgreSQL sunucularınızı görüntüleyin, düzenleyin veya silin.</p>
-            <a href="#" class="btn btn-info" onclick="alert('Sunucuları listeleme özelliği geliştirme aşamasındadır!')">
+            <a href="/sunuculari-listele" class="btn btn-info">
               <span class="btn-icon">📋</span>
               Sunucuları Listele
             </a>
@@ -3184,14 +3407,18 @@ TEMPLATE_MANUEL_SUNUCU_EKLE = r"""
         <div class="row">
           <div class="col-md-6">
             <ul class="text-muted">
+              <li>Sunucu Hostname</li>
+              <li>Sunucu IP Adresi</li>
+              <li>İşletim Sistemi</li>
               <li>CPU Bilgisi</li>
+              <li>CPU Core Sayısı</li>
               <li>Toplam RAM</li>
               <li>Disk Bilgileri</li>
-              <li>Sistem Uptime</li>
             </ul>
           </div>
           <div class="col-md-6">
             <ul class="text-muted">
+              <li>Sistem Uptime</li>
               <li>PostgreSQL Durumu</li>
               <li>PostgreSQL Versiyonu</li>
               <li>Replication Durumu</li>
@@ -3213,6 +3440,343 @@ TEMPLATE_MANUEL_SUNUCU_EKLE = r"""
         btnText.textContent = 'Bağlanıyor...';
         submitBtn.disabled = true;
       });
+    </script>
+    
+    {{ theme_script|safe }}
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
+"""
+
+# Toplu sunucu ekleme sayfası
+TEMPLATE_TOPLU_SUNUCU_EKLE = r"""
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Toplu Sunucu Ekle - PostgreSQL Management System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      :root {
+        --bg: #0f1216; --panel: #171b21; --muted: #9aa5b1; --txt: #eef2f6; --brand: #50b0ff; --accent: #7cf; --ring: rgba(80,176,255,.35);
+        --drop: #0f1216; --hover: #212833;
+      }
+      
+      /* Light mode variables */
+      [data-theme="light"] {
+        --bg: #f8fafc; --panel: #ffffff; --muted: #64748b; --txt: #1e293b; --brand: #3b82f6; --accent: #06b6d4; --ring: rgba(59,130,246,.35);
+        --drop: #ffffff; --hover: #f1f5f9;
+      }
+      
+      /* Dark mode variables */
+      [data-theme="dark"] {
+        --bg: #0f1216; --panel: #171b21; --muted: #9aa5b1; --txt: #eef2f6; --brand: #50b0ff; --accent: #7cf; --ring: rgba(80,176,255,.35);
+        --drop: #0f1216; --hover: #212833;
+      }
+      
+      body { 
+        padding-top: 20px; 
+        background: var(--bg); 
+        color: var(--txt);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      }
+      
+      [data-theme="dark"] body { background: linear-gradient(180deg, #0c0f13, #0f1216); }
+      [data-theme="light"] body { background: linear-gradient(180deg, #f1f5f9, #f8fafc); }
+      
+      .container-lg { background: var(--panel); border-radius: 1rem; padding: 2rem; margin-top: 1rem; border: 1px solid; }
+      [data-theme="dark"] .container-lg { border-color: #242b37; }
+      [data-theme="light"] .container-lg { border-color: #e2e8f0; }
+      
+      .card { background: var(--panel); border: 1px solid; }
+      [data-theme="dark"] .card { border-color: #243044; }
+      [data-theme="light"] .card { border-color: #e2e8f0; }
+      
+      .form-control, .form-select { background: var(--panel); color: var(--txt); border: 1px solid; }
+      [data-theme="dark"] .form-control, .form-select { border-color: #243044; }
+      [data-theme="light"] .form-control, .form-select { border-color: #e2e8f0; }
+      
+      .form-control:focus, .form-select:focus { background: var(--panel); color: var(--txt); border-color: var(--brand); box-shadow: 0 0 0 0.2rem var(--ring); }
+      
+      .btn-primary { background: var(--brand); border-color: var(--brand); }
+      .btn-primary:hover { background: var(--accent); border-color: var(--accent); }
+      .btn-warning { background: #f59e0b; border-color: #f59e0b; }
+      
+      .btn { padding: 1rem 2rem; font-size: 1.1rem; font-weight: 600; border-radius: 0.75rem; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 0.75rem; transition: all 0.3s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+      .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+      
+      .btn-icon { font-size: 1.5rem; }
+      
+      .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2rem; }
+      .header h1 { margin: 0; color: var(--txt); }
+      
+      /* Theme Toggle Button */
+      #themeToggle { all: unset; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; background: var(--hover); border: 1px solid transparent; }
+      #themeToggle:hover { background: var(--hover); border-color: var(--brand); }
+      [data-theme="dark"] #themeToggle:hover { border-color: #50b0ff; }
+      [data-theme="light"] #themeToggle:hover { border-color: #3b82f6; }
+      
+      /* Progress bar */
+      .progress { height: 1.5rem; background: var(--hover); border-radius: 0.75rem; overflow: hidden; }
+      .progress-bar { background: linear-gradient(90deg, var(--brand), var(--accent)); transition: width 0.3s ease; }
+      
+      /* Results table */
+      .results-table { margin-top: 2rem; }
+      .table { color: var(--txt); background: var(--panel); }
+      .table-striped > tbody > tr:nth-of-type(odd) > td { background: var(--hover); }
+      
+      .status-success { background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+      .status-danger { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+      .status-warning { background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="container-lg">
+      <div class="header">
+        <h1>📦 Toplu Sunucu Ekle</h1>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <a href="/envanter" class="btn btn-outline-secondary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">← Envanter</a>
+          <button id="themeToggle" title="Dark/Light Mode Toggle">
+            <span id="themeIcon" style="font-size: 1.2rem;">🌙</span>
+          </button>
+        </div>
+      </div>
+      
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">
+              {{ message }}
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      
+      <div class="card">
+        <h3>Excel Dosyası ve SSH Bilgileri</h3>
+        <p class="text-muted">Excel dosyasından sunucu isimlerini alıp SSH ile otomatik bilgi toplama yapacağız.</p>
+        
+        <form method="POST" enctype="multipart/form-data" id="bulkForm">
+          <div class="row">
+            <div class="col-md-6">
+              <div class="mb-3">
+                <label for="excel_file" class="form-label">Excel Dosyası</label>
+                <input type="file" class="form-control" id="excel_file" name="excel_file" accept=".xlsx,.xls" required>
+                <div class="form-text">Excel dosyasında sunucu isimleri ilk sütunda olmalıdır.</div>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="mb-3">
+                <label for="ssh_user" class="form-label">SSH Kullanıcı</label>
+                <input type="text" class="form-control" id="ssh_user" name="ssh_user" required placeholder="örn: root, ubuntu, centos">
+              </div>
+            </div>
+          </div>
+          
+          <div class="row">
+            <div class="col-md-6">
+              <div class="mb-3">
+                <label for="ssh_password" class="form-label">SSH Şifre</label>
+                <input type="password" class="form-control" id="ssh_password" name="ssh_password" required placeholder="SSH kullanıcı şifresi">
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="mb-3">
+                <label for="ssh_port" class="form-label">SSH Port</label>
+                <input type="number" class="form-control" id="ssh_port" name="ssh_port" value="22" min="1" max="65535">
+              </div>
+            </div>
+          </div>
+          
+          <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+            <a href="/envanter" class="btn btn-outline-secondary me-md-2">İptal</a>
+            <button type="submit" class="btn btn-warning">
+              <span class="loading spinner-border spinner-border-sm me-2" role="status" style="display: none;"></span>
+              <span class="btn-text">Toplu Tarama Başlat</span>
+            </button>
+          </div>
+        </form>
+      </div>
+      
+      <div class="card">
+        <h4>📋 Toplanacak Bilgiler</h4>
+        <div class="row">
+          <div class="col-md-6">
+            <ul class="text-muted">
+              <li>Sunucu Hostname</li>
+              <li>Sunucu IP Adresi</li>
+              <li>İşletim Sistemi</li>
+              <li>CPU Bilgisi</li>
+              <li>CPU Core Sayısı</li>
+              <li>Toplam RAM</li>
+              <li>Disk Bilgileri</li>
+            </ul>
+          </div>
+          <div class="col-md-6">
+            <ul class="text-muted">
+              <li>Sistem Uptime</li>
+              <li>PostgreSQL Durumu</li>
+              <li>PostgreSQL Versiyonu</li>
+              <li>Replication Durumu</li>
+              <li>pgBackRest Durumu</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      
+      {% if results %}
+      <div class="results-table">
+        <div class="card">
+          <h4>📊 Toplu Tarama Sonuçları</h4>
+          <div class="table-responsive">
+            <table class="table table-striped">
+              <thead>
+                <tr>
+                  <th>Hostname</th>
+                  <th>IP</th>
+                  <th>OS</th>
+                  <th>CPU</th>
+                  <th>Cores</th>
+                  <th>RAM</th>
+                  <th>Disk</th>
+                  <th>Uptime</th>
+                  <th>PostgreSQL</th>
+                  <th>Versiyon</th>
+                  <th>Replication</th>
+                  <th>pgBackRest</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for result in results %}
+                <tr>
+                  <td><strong>{{ result.hostname }}</strong></td>
+                  <td>{{ result.ip }}</td>
+                  <td>{{ result.os_info }}</td>
+                  <td>{{ result.cpu_info }}</td>
+                  <td>{{ result.cpu_cores }}</td>
+                  <td>{{ result.ram_total }}</td>
+                  <td>
+                    {% if result.disks is string %}
+                      {{ result.disks }}
+                    {% elif result.disks %}
+                      {% for disk in result.disks %}
+                        <div style="font-size: 0.8rem; margin-bottom: 0.25rem;">
+                          {{ disk.device }}: {{ disk.percent }}
+                          {% if disk.percent_num >= 80 %}
+                            <span class="status-danger">⚠️</span>
+                          {% endif %}
+                        </div>
+                      {% endfor %}
+                    {% endif %}
+                  </td>
+                  <td>{{ result.uptime }}</td>
+                  <td>
+                    {% if result.postgresql_status == 'Var' %}
+                      <span class="status-success">✓ Var</span>
+                    {% else %}
+                      <span class="status-danger">✗ Yok</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ result.postgresql_version if result.postgresql_status == 'Var' else 'N/A' }}</td>
+                  <td>
+                    {% if result.postgresql_status == 'Var' %}
+                      {% if result.postgresql_replication == 'Var' %}
+                        <span class="status-success">✓ Var</span>
+                      {% else %}
+                        <span class="status-danger">✗ Yok</span>
+                      {% endif %}
+                    {% else %}
+                      N/A
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if result.pgbackrest_status == 'Var' %}
+                      <span class="status-success">✓ Var</span>
+                    {% else %}
+                      <span class="status-danger">✗ Yok</span>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          
+          <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+            <button class="btn btn-success me-md-2" onclick="addAllToInventory()">📋 Tümünü Envantere Ekle</button>
+            <button class="btn btn-primary" onclick="exportToExcel()">📊 Excel'e Aktar</button>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    
+    <script>
+      // Form submit loading
+      document.getElementById('bulkForm').addEventListener('submit', function() {
+        const submitBtn = this.querySelector('button[type="submit"]');
+        const loading = submitBtn.querySelector('.loading');
+        const btnText = submitBtn.querySelector('.btn-text');
+        
+        loading.style.display = 'inline-block';
+        btnText.textContent = 'Tarama Başlatılıyor...';
+        submitBtn.disabled = true;
+      });
+      
+      function exportToExcel() {
+        alert('Excel export özelliği geliştirme aşamasındadır!');
+      }
+      
+      function addAllToInventory() {
+        if (confirm('Tüm sunucuları envantere eklemek istediğinizden emin misiniz?')) {
+          // Tüm sunucu bilgilerini tek tek envantere ekle
+          {% if results %}
+            {% for result in results %}
+              addSingleToInventory({
+                hostname: '{{ result.hostname }}',
+                ip: '{{ result.ip }}',
+                ssh_port: '{{ result.ssh_port }}',
+                ssh_user: '{{ result.ssh_user }}',
+                os_info: '{{ result.os_info }}',
+                cpu_info: '{{ result.cpu_info }}',
+                cpu_cores: '{{ result.cpu_cores }}',
+                ram_total: '{{ result.ram_total }}',
+                disks: {{ result.disks|tojson }},
+                uptime: '{{ result.uptime }}',
+                postgresql_status: '{{ result.postgresql_status }}',
+                postgresql_version: '{{ result.postgresql_version }}',
+                postgresql_replication: '{{ result.postgresql_replication }}',
+                pgbackrest_status: '{{ result.pgbackrest_status }}'
+              });
+            {% endfor %}
+          {% endif %}
+          
+          alert('Tüm sunucular envantere eklendi!');
+          setTimeout(() => {
+            window.location.href = '/sunuculari-listele';
+          }, 1000);
+        }
+      }
+      
+      function addSingleToInventory(serverData) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/envantere-ekle';
+        form.style.display = 'none';
+        
+        for (const [key, value] of Object.entries(serverData)) {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value;
+          form.appendChild(input);
+        }
+        
+        document.body.appendChild(form);
+        form.submit();
+        document.body.removeChild(form);
+      }
     </script>
     
     {{ theme_script|safe }}
@@ -3397,8 +3961,24 @@ TEMPLATE_SUNUCU_BILGILERI = r"""
           </thead>
           <tbody>
             <tr>
+              <td><strong>Sunucu Hostname</strong></td>
+              <td>{{ server_info.hostname }}</td>
+            </tr>
+            <tr>
+              <td><strong>Sunucu IP Adresi</strong></td>
+              <td>{{ server_info.ip }}</td>
+            </tr>
+            <tr>
+              <td><strong>İşletim Sistemi</strong></td>
+              <td>{{ server_info.os_info }}</td>
+            </tr>
+            <tr>
               <td><strong>CPU Bilgisi</strong></td>
               <td>{{ server_info.cpu_info }}</td>
+            </tr>
+            <tr>
+              <td><strong>CPU Core Sayısı</strong></td>
+              <td>{{ server_info.cpu_cores }}</td>
             </tr>
             <tr>
               <td><strong>Toplam RAM</strong></td>
@@ -3479,6 +4059,7 @@ TEMPLATE_SUNUCU_BILGILERI = r"""
       
       <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
         <a href="/envanter" class="btn btn-outline-secondary me-md-2">Envanter'e Dön</a>
+        <button class="btn btn-success me-md-2" onclick="addToInventory()">📋 Envantere Ekle</button>
         <button class="btn btn-primary" onclick="exportToExcel()">📊 Excel'e Aktar</button>
       </div>
     </div>
@@ -3487,6 +4068,42 @@ TEMPLATE_SUNUCU_BILGILERI = r"""
       function exportToExcel() {
         // Excel export functionality
         alert('Excel export özelliği geliştirme aşamasındadır!');
+      }
+      
+      function addToInventory() {
+        // Sunucu bilgilerini form olarak gönder
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/envantere-ekle';
+        
+        // Tüm sunucu bilgilerini form alanları olarak ekle
+        const serverData = {
+          hostname: '{{ server_info.hostname }}',
+          ip: '{{ server_info.ip }}',
+          ssh_port: '{{ server_info.ssh_port }}',
+          ssh_user: '{{ server_info.ssh_user }}',
+          os_info: '{{ server_info.os_info }}',
+          cpu_info: '{{ server_info.cpu_info }}',
+          cpu_cores: '{{ server_info.cpu_cores }}',
+          ram_total: '{{ server_info.ram_total }}',
+          disks: '{{ server_info.disks|tojson }}',
+          uptime: '{{ server_info.uptime }}',
+          postgresql_status: '{{ server_info.postgresql_status }}',
+          postgresql_version: '{{ server_info.postgresql_version }}',
+          postgresql_replication: '{{ server_info.postgresql_replication }}',
+          pgbackrest_status: '{{ server_info.pgbackrest_status }}'
+        };
+        
+        for (const [key, value] of Object.entries(serverData)) {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value;
+          form.appendChild(input);
+        }
+        
+        document.body.appendChild(form);
+        form.submit();
       }
     </script>
     
@@ -3834,6 +4451,247 @@ def manuel_sunucu_ekle():
             return render_template_string(TEMPLATE_MANUEL_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
     
     return render_template_string(TEMPLATE_MANUEL_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+
+# Envantere ekleme route'u
+@app.route("/envantere-ekle", methods=["POST"])
+@require_auth("multiquery")
+def envantere_ekle():
+    """Sunucu bilgilerini envantere ekle/güncelle"""
+    try:
+        # Form verilerini al
+        server_info = {
+            'hostname': request.form.get('hostname', ''),
+            'ip': request.form.get('ip', ''),
+            'ssh_port': request.form.get('ssh_port', 22),
+            'ssh_user': request.form.get('ssh_user', ''),
+            'os_info': request.form.get('os_info', 'N/A'),
+            'cpu_info': request.form.get('cpu_info', 'N/A'),
+            'cpu_cores': request.form.get('cpu_cores', 'N/A'),
+            'ram_total': request.form.get('ram_total', 'N/A'),
+            'disks': request.form.get('disks', '[]'),
+            'uptime': request.form.get('uptime', 'N/A'),
+            'postgresql_status': request.form.get('postgresql_status', 'Yok'),
+            'postgresql_version': request.form.get('postgresql_version', 'N/A'),
+            'postgresql_replication': request.form.get('postgresql_replication', 'N/A'),
+            'pgbackrest_status': request.form.get('pgbackrest_status', 'Yok')
+        }
+        
+        # Disks bilgisini parse et
+        import json
+        try:
+            server_info['disks'] = json.loads(server_info['disks'])
+        except:
+            server_info['disks'] = []
+        
+        # Sunucu bilgilerini kaydet/güncelle
+        success, message = save_sunucu_bilgileri(server_info)
+        
+        if success:
+            flash(f"Sunucu başarıyla {message}!", "success")
+        else:
+            flash(f"Sunucu kaydedilemedi: {message}", "danger")
+            
+    except Exception as e:
+        flash(f"Envantere ekleme hatası: {str(e)}", "danger")
+    
+    return redirect(url_for("sunuculari_listele"))
+
+# Toplu sunucu ekleme sayfası
+@app.route("/toplu-sunucu-ekle", methods=["GET", "POST"])
+@require_auth("multiquery")
+def toplu_sunucu_ekle():
+    if request.method == "POST":
+        # Excel dosyasını al
+        excel_file = request.files.get("excel_file")
+        ssh_user = request.form.get("ssh_user", "").strip()
+        ssh_password = request.form.get("ssh_password", "")
+        ssh_port = request.form.get("ssh_port", "22").strip()
+        
+        if not all([excel_file, ssh_user, ssh_password]):
+            flash("Tüm alanları doldurunuz.", "danger")
+            return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+        
+        try:
+            # Excel dosyasını oku
+            import pandas as pd
+            df = pd.read_excel(excel_file)
+            
+            # İlk sütundan sunucu isimlerini al
+            server_names = df.iloc[:, 0].dropna().astype(str).tolist()
+            
+            if not server_names:
+                flash("Excel dosyasında sunucu ismi bulunamadı.", "danger")
+                return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+            
+            # Her sunucu için bilgi topla
+            results = []
+            for hostname in server_names:
+                try:
+                    # Hostname'i IP'ye çevirmeye çalış
+                    try:
+                        ip = socket.gethostbyname(hostname)
+                    except:
+                        ip = hostname  # IP çevrilemezse hostname'i kullan
+                    
+                    # Sunucu bilgilerini topla
+                    server_info = collect_server_info(hostname, ip, ssh_port, ssh_user, ssh_password)
+                    results.append(server_info)
+                    
+                except Exception as e:
+                    # Hata durumunda boş bilgi ekle
+                    results.append({
+                        'hostname': hostname,
+                        'ip': 'Bağlanamadı',
+                        'ssh_port': ssh_port,
+                        'ssh_user': ssh_user,
+                        'os_info': 'N/A',
+                        'cpu_info': 'N/A',
+                        'cpu_cores': 'N/A',
+                        'ram_total': 'N/A',
+                        'disks': [],
+                        'uptime': 'N/A',
+                        'postgresql_status': 'Yok',
+                        'postgresql_version': 'N/A',
+                        'postgresql_replication': 'N/A',
+                        'pgbackrest_status': 'Yok',
+                        'error': str(e)
+                    })
+            
+            return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, 
+                                        results=results, 
+                                        theme_script=THEME_SCRIPT)
+            
+        except Exception as e:
+            flash(f"Excel dosyası işlenirken hata oluştu: {str(e)}", "danger")
+            return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+    
+    return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
+
+# Sunucuları listeleme sayfası
+@app.route("/sunuculari-listele")
+@require_auth("multiquery")
+def sunuculari_listele():
+    # Önce duplicate kayıtları temizle
+    try:
+        cleaned_count = clean_duplicate_servers()
+        if cleaned_count > 0:
+            flash(f"{cleaned_count} duplicate kayıt temizlendi.", "info")
+    except Exception as e:
+        print(f"Duplicate temizleme hatası: {e}")
+    
+    # Veritabanından tüm sunucu bilgilerini al
+    try:
+        servers = db_query("SELECT * FROM sunucu_envanteri ORDER BY created_at DESC")
+        
+        # Disk bilgilerini JSON parse et
+        import json
+        for server in servers:
+            try:
+                if server['disks']:
+                    server['disks'] = json.loads(server['disks'])
+                else:
+                    server['disks'] = []
+            except:
+                server['disks'] = []
+        
+        return render_template_string(TEMPLATE_SUNUCULARI_LISTELE, 
+                                    servers=servers, 
+                                    theme_script=THEME_SCRIPT)
+    except Exception as e:
+        flash(f"Sunucu listesi alınamadı: {str(e)}", "danger")
+        return render_template_string(TEMPLATE_SUNUCULARI_LISTELE, 
+                                    servers=[], 
+                                    theme_script=THEME_SCRIPT)
+
+# Sunucu listesi Excel export
+@app.route("/sunucu-excel-export")
+@require_auth("multiquery")
+def sunucu_excel_export():
+    """Sunucu listesini Excel formatında export et"""
+    try:
+        # Veritabanından tüm sunucu bilgilerini al
+        servers = db_query("SELECT * FROM sunucu_envanteri ORDER BY created_at DESC")
+        
+        # Excel dosyası oluştur
+        import pandas as pd
+        from io import BytesIO
+        
+        # Sunucu verilerini Excel formatına dönüştür
+        excel_data = []
+        for server in servers:
+            # Disk bilgilerini parse et
+            import json
+            try:
+                disks = json.loads(server['disks']) if server['disks'] else []
+                disk_info = ""
+                for disk in disks:
+                    disk_info += f"{disk['device']} ({disk['mount']}): {disk['size']} toplam, {disk['used']} kullanılan, {disk['available']} boş, %{disk['percent']}\n"
+                disk_info = disk_info.strip()
+            except:
+                disk_info = server['disks'] or "N/A"
+            
+            excel_data.append({
+                'Hostname': server['hostname'],
+                'IP Adresi': server['ip'],
+                'SSH Port': server['ssh_port'],
+                'SSH Kullanıcı': server['ssh_user'],
+                'İşletim Sistemi': server['os_info'],
+                'CPU Bilgisi': server['cpu_info'],
+                'CPU Core Sayısı': server['cpu_cores'],
+                'Toplam RAM': server['ram_total'],
+                'Disk Bilgileri': disk_info,
+                'Sistem Uptime': server['uptime'],
+                'PostgreSQL Durumu': server['postgresql_status'],
+                'PostgreSQL Versiyonu': server['postgresql_version'],
+                'PostgreSQL Replication': server['postgresql_replication'],
+                'pgBackRest Durumu': server['pgbackrest_status'],
+                'Eklenme Tarihi': server['created_at'],
+                'Güncelleme Tarihi': server['updated_at']
+            })
+        
+        # DataFrame oluştur
+        df = pd.DataFrame(excel_data)
+        
+        # Excel dosyası oluştur
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Sunucu Envanteri', index=False)
+            
+            # Worksheet'i al ve sütun genişliklerini ayarla
+            worksheet = writer.sheets['Sunucu Envanteri']
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        output.seek(0)
+        
+        # Dosya adı
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"sunucu_envanteri_{timestamp}.xlsx"
+        
+        # Log export işlemini kaydet
+        log_activity(session['user_id'], session['username'], 'export_servers', 
+                    f"Sunucu envanteri Excel export - {len(servers)} sunucu", 'sunuculari_listele')
+        
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        
+    except Exception as e:
+        flash(f"Excel export hatası: {str(e)}", "danger")
+        return redirect(url_for("sunuculari_listele"))
 
 @app.route("/add_server", methods=["POST"])
 @require_auth("multiquery")
@@ -4821,7 +5679,289 @@ def admin_manage_permissions(user_id):
     </html>
     """, user=user, page_permissions=page_permissions, user_perms=user_perms)
 
+# Sunucuları listeleme template'i
+TEMPLATE_SUNUCULARI_LISTELE = r"""
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sunucuları Listele - PostgreSQL Management System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      /* Theme variables */
+      :root {
+        --bg: #f8fafc; --panel: #ffffff; --muted: #64748b; --txt: #1e293b; --brand: #3b82f6; --accent: #06b6d4; --ring: rgba(59,130,246,.35);
+        --drop: #ffffff; --hover: #f1f5f9;
+      }
+      
+      /* Dark mode variables */
+      [data-theme="dark"] {
+        --bg: #0f1216; --panel: #171b21; --muted: #9aa5b1; --txt: #eef2f6; --brand: #50b0ff; --accent: #7cf; --ring: rgba(80,176,255,.35);
+        --drop: #0f1216; --hover: #212833;
+      }
+      
+      body { 
+        padding-top: 20px; 
+        background: var(--bg); 
+        color: var(--txt);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      }
+      
+      [data-theme="dark"] body { background: linear-gradient(180deg, #0c0f13, #0f1216); }
+      [data-theme="light"] body { background: linear-gradient(180deg, #f1f5f9, #f8fafc); }
+      
+      .container-lg { background: var(--panel); border-radius: 1rem; padding: 2rem; margin-top: 1rem; border: 1px solid; max-width: 1200px; }
+      [data-theme="dark"] .container-lg { border-color: #242b37; }
+      [data-theme="light"] .container-lg { border-color: #e2e8f0; }
+      
+      .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid; }
+      [data-theme="dark"] .header { border-color: #242b37; }
+      [data-theme="light"] .header { border-color: #e2e8f0; }
+      
+      .header h1 { margin: 0; color: var(--txt); font-weight: 700; font-size: 2rem; }
+      
+      .card { background: var(--panel); border: 1px solid; border-radius: 0.75rem; padding: 1.5rem; margin-bottom: 1.5rem; }
+      [data-theme="dark"] .card { border-color: #242b37; }
+      [data-theme="light"] .card { border-color: #e2e8f0; }
+      
+      .card h3 { margin: 0 0 1rem 0; color: var(--txt); font-weight: 600; }
+      .card h4 { margin: 0 0 1rem 0; color: var(--txt); font-weight: 600; }
+      
+      .table { color: var(--txt); background: var(--panel); }
+      .table-striped > tbody > tr:nth-of-type(odd) > td { background: var(--hover); }
+      
+      .status-success { background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+      .status-danger { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+      .status-warning { background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.2); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-weight: 600; }
+      
+      .server-card { margin-bottom: 1.5rem; }
+      .server-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+      .server-title { font-size: 1.25rem; font-weight: 600; color: var(--txt); }
+      .server-date { font-size: 0.875rem; color: var(--muted); }
+      
+      /* Disk bilgileri stilleri */
+      .disk-info-item { 
+        margin-bottom: 0.5rem; 
+        padding: 0.5rem; 
+        background: var(--hover); 
+        border-radius: 0.25rem; 
+        border: 1px solid transparent;
+      }
+      [data-theme="dark"] .disk-info-item { border-color: #242b37; }
+      [data-theme="light"] .disk-info-item { border-color: #e2e8f0; }
+      
+      .disk-device { font-weight: 600; color: var(--txt); }
+      .disk-mount { color: var(--muted); font-style: italic; }
+      .disk-details { font-size: 0.875rem; color: var(--txt); margin-top: 0.25rem; }
+      
+      .text-muted { color: var(--muted) !important; }
+      
+      /* Theme Toggle Button */
+      #themeToggle { all: unset; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; background: var(--hover); border: 1px solid transparent; }
+      #themeToggle:hover { background: var(--hover); border-color: var(--brand); }
+      [data-theme="dark"] #themeToggle:hover { border-color: #50b0ff; }
+      [data-theme="light"] #themeToggle:hover { border-color: #3b82f6; }
+    </style>
+  </head>
+  <body>
+    <div class="container-lg">
+      <div class="header">
+        <h1>📋 Sunucuları Listele</h1>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <a href="/envanter" class="btn btn-outline-secondary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">← Envanter</a>
+          <button id="themeToggle" title="Dark/Light Mode Toggle">
+            <span id="themeIcon" style="font-size: 1.2rem;">🌙</span>
+          </button>
+        </div>
+      </div>
+      
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">
+              {{ message }}
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      
+      {% if servers %}
+        <div class="card">
+          <h3>📊 Kayıtlı Sunucular ({{ servers|length }} adet)</h3>
+          
+          {% for server in servers %}
+            <div class="server-card">
+              <div class="server-header">
+                <div class="server-title">🖥️ {{ server.hostname }}</div>
+                <div class="server-date">{{ server.created_at }}</div>
+              </div>
+              
+              <div class="table-responsive">
+                <table class="table table-striped">
+                  <tbody>
+                    <tr>
+                      <td style="width: 30%;"><strong>Sunucu IP Adresi</strong></td>
+                      <td>{{ server.ip }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>SSH Bilgileri</strong></td>
+                      <td>Port: {{ server.ssh_port }} | Kullanıcı: {{ server.ssh_user }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>İşletim Sistemi</strong></td>
+                      <td>{{ server.os_info }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>CPU Bilgisi</strong></td>
+                      <td>{{ server.cpu_info }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>CPU Core Sayısı</strong></td>
+                      <td>{{ server.cpu_cores }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Toplam RAM</strong></td>
+                      <td>{{ server.ram_total }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Disk Bilgileri</strong></td>
+                      <td>
+                        {% if server.disks %}
+                          {% for disk in server.disks %}
+                            <div class="disk-info-item">
+                              <div class="disk-device">{{ disk.device }}</div>
+                              <div class="disk-mount">{{ disk.mount }}</div>
+                              <div class="disk-details">
+                                {{ disk.size }} toplam | {{ disk.used }} kullanılan | {{ disk.available }} boş
+                                <span class="status-{{ 'warning' if disk.percent_num >= 80 else 'success' }}" style="margin-left: 0.5rem;">
+                                  {{ disk.percent }}
+                                </span>
+                              </div>
+                            </div>
+                          {% endfor %}
+                        {% else %}
+                          Disk bilgisi yok
+                        {% endif %}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>Sistem Uptime</strong></td>
+                      <td>{{ server.uptime }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>PostgreSQL Durumu</strong></td>
+                      <td>
+                        {% if server.postgresql_status == 'Var' %}
+                          <span class="status-success">✓ Var</span>
+                        {% else %}
+                          <span class="status-danger">✗ Yok</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                    {% if server.postgresql_status == 'Var' %}
+                    <tr>
+                      <td><strong>PostgreSQL Versiyonu</strong></td>
+                      <td>{{ server.postgresql_version }}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>PostgreSQL Replication</strong></td>
+                      <td>
+                        {% if server.postgresql_replication == 'Var' %}
+                          <span class="status-success">✓ Var</span>
+                        {% else %}
+                          <span class="status-danger">✗ Yok</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                    {% endif %}
+                    <tr>
+                      <td><strong>pgBackRest Durumu</strong></td>
+                      <td>
+                        {% if server.pgbackrest_status == 'Var' %}
+                          <span class="status-success">✓ Var</span>
+                        {% else %}
+                          <span class="status-danger">✗ Yok</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {% endfor %}
+          
+          <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+            <button class="btn btn-success" onclick="exportServersToExcel()">📊 Excel'e Aktar</button>
+          </div>
+        </div>
+      {% else %}
+        <div class="card">
+          <h3>📋 Kayıtlı Sunucu Yok</h3>
+          <p class="text-muted">Henüz hiç sunucu eklenmemiş. Manuel veya toplu sunucu ekleme ile sunucu bilgilerini toplayabilirsiniz.</p>
+          <div style="display: flex; gap: 1rem;">
+            <a href="/manuel-sunucu-ekle" class="btn btn-primary">➕ Manuel Sunucu Ekle</a>
+            <a href="/toplu-sunucu-ekle" class="btn btn-warning">📦 Toplu Sunucu Ekle</a>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+    
+    <script>
+    // Dark Mode Toggle
+    function initTheme() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const theme = savedTheme === 'dark' || (savedTheme === 'auto' && prefersDark) ? 'dark' : 'light';
+      
+      document.documentElement.setAttribute('data-theme', theme);
+      
+      const themeIcon = document.getElementById('themeIcon');
+      if (themeIcon) {
+        themeIcon.textContent = theme === 'dark' ? '🌙' : '☀️';
+      }
+      
+      localStorage.setItem('theme', theme);
+    }
+
+    function toggleTheme() {
+      const currentTheme = document.documentElement.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      
+      document.documentElement.setAttribute('data-theme', newTheme);
+      
+      const themeIcon = document.getElementById('themeIcon');
+      if (themeIcon) {
+        themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+      }
+      
+      localStorage.setItem('theme', newTheme);
+    }
+
+    // Initialize theme on page load
+    document.addEventListener('DOMContentLoaded', function() {
+      initTheme();
+
+      // Add click event to theme toggle
+      const themeToggle = document.getElementById('themeToggle');
+      if (themeToggle) {
+        themeToggle.addEventListener('click', toggleTheme);
+      }
+    });
+    
+    // Excel export function
+    function exportServersToExcel() {
+      window.location.href = '/sunucu-excel-export';
+    }
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
+"""
+
 if __name__ == "__main__":
     init_db()
+    init_sunucu_envanteri_table()
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
