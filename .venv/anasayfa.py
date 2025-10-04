@@ -683,15 +683,23 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         except:
             pass
         
-        # Disk bilgisi - daha detaylı format
+        # Disk bilgisi - daha detaylı format ve debug
         try:
+            # Önce tüm diskleri al
             stdin, stdout, stderr = ssh.exec_command("df -h | grep -v 'tmpfs\\|udev\\|Filesystem' | awk '{print $1\"|\"$2\"|\"$3\"|\"$4\"|\"$5\"|\"$6}' | head -10")
             disk_info = stdout.read().decode().strip()
+            stderr_output = stderr.read().decode().strip()
+            
+            print(f"Disk komut çıktısı: {disk_info}")
+            if stderr_output:
+                print(f"Disk komut hatası: {stderr_output}")
+            
             if disk_info:
                 disks = []
                 for line in disk_info.split('\n'):
                     if line.strip():
                         parts = line.split('|')
+                        print(f"Disk satırı parse ediliyor: {line} -> {parts}")
                         if len(parts) >= 6:
                             device = parts[0].strip()
                             size = parts[1].strip()
@@ -700,9 +708,10 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
                             percent = parts[4].strip()
                             mount = parts[5].strip()
                             
-                            # Sadece önemli diskleri ekle (root, home, data vb.)
-                            if any(keyword in mount.lower() for keyword in ['/', 'home', 'data', 'var', 'opt']) or \
-                               any(keyword in device.lower() for keyword in ['root', 'home', 'data']):
+                            print(f"Disk bulundu: {device} -> {mount} ({percent})")
+                            
+                            # Tüm fiziksel diskleri ekle (filtreleme kaldırıldı)
+                            if device and device != '' and mount and mount != '':
                                 disks.append({
                                     'device': device,
                                     'size': size,
@@ -713,8 +722,13 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
                                     'percent_num': int(percent.replace('%', '')) if percent.replace('%', '').isdigit() else 0
                                 })
                 
+                print(f"Toplam {len(disks)} disk bulundu")
                 server_info['disks'] = disks
-        except:
+            else:
+                print("Disk bilgisi alınamadı")
+                server_info['disks'] = []
+        except Exception as e:
+            print(f"Disk bilgisi toplama hatası: {e}")
             server_info['disks'] = []
         
         # Uptime bilgisi
@@ -5959,6 +5973,7 @@ TEMPLATE_SUNUCULARI_LISTELE = r"""
   </body>
 </html>
 """
+
 
 if __name__ == "__main__":
     init_db()
