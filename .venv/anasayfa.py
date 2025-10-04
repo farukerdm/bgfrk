@@ -809,35 +809,37 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         except:
             pass
         
-        # Disk bilgisi - daha detaylı format ve debug
+        # Disk bilgisi - basit ve uyumlu format
         try:
-            # Önce tüm diskleri al
-            stdin, stdout, stderr = ssh.exec_command("df -h | grep -v 'tmpfs\\|udev\\|Filesystem' | awk '{print $1\"|\"$2\"|\"$3\"|\"$4\"|\"$5\"|\"$6}' | head -10")
-            disk_info = stdout.read().decode().strip()
+            # Basit df komutu
+            stdin, stdout, stderr = ssh.exec_command("df -h")
+            disk_output = stdout.read().decode().strip()
             stderr_output = stderr.read().decode().strip()
             
-            print(f"Disk komut çıktısı: {disk_info}")
+            print(f"Disk komut çıktısı:\n{disk_output}")
             if stderr_output:
                 print(f"Disk komut hatası: {stderr_output}")
             
-            if disk_info:
+            if disk_output:
                 disks = []
-                for line in disk_info.split('\n'):
-                    if line.strip():
-                        parts = line.split('|')
-                        print(f"Disk satırı parse ediliyor: {line} -> {parts}")
+                lines = disk_output.split('\n')
+                
+                for line in lines[1:]:  # İlk satırı (başlık) atla
+                    if line.strip() and not any(skip in line.lower() for skip in ['tmpfs', 'udev', 'devtmpfs', 'overlay']):
+                        # Satırı boşluklara göre böl
+                        parts = line.split()
                         if len(parts) >= 6:
-                            device = parts[0].strip()
-                            size = parts[1].strip()
-                            used = parts[2].strip()
-                            available = parts[3].strip()
-                            percent = parts[4].strip()
-                            mount = parts[5].strip()
+                            device = parts[0]
+                            size = parts[1]
+                            used = parts[2]
+                            available = parts[3]
+                            percent = parts[4]
+                            mount = parts[5]
                             
                             print(f"Disk bulundu: {device} -> {mount} ({percent})")
                             
-                            # Tüm fiziksel diskleri ekle (filtreleme kaldırıldı)
-                            if device and device != '' and mount and mount != '':
+                            # Geçerli disk kontrolü
+                            if device and mount and mount.startswith('/'):
                                 disks.append({
                                     'device': device,
                                     'size': size,
@@ -2961,11 +2963,14 @@ TEMPLATE_INDEX = r"""
                   <textarea id="sqlTextarea" name="sql" class="form-control code" rows="6" placeholder="SELECT version();" required>SELECT version();</textarea>
                 </div>
 
-                <div class="mb-2">
+                <div class="mb-2 d-flex justify-content-between align-items-center">
                   <div class="form-check">
                     <input class="form-check-input" type="checkbox" id="selectAll" onclick="toggleAll(this)">
                     <label class="form-check-label" for="selectAll">Tümünü Seç / Kaldır</label>
                   </div>
+                  <a href="{{ url_for('load_inventory_servers') }}" class="btn btn-warning btn-sm">
+                    📦 Envanterden Sunucuları Çek
+                  </a>
                 </div>
 
                 <div class="table-responsive">
@@ -2983,7 +2988,7 @@ TEMPLATE_INDEX = r"""
                     </thead>
                     <tbody>
                       {% for s in servers %}
-                      <tr onclick="toggleServerCheckbox({{ s.id }})" style="cursor: pointer;">
+                      <tr onclick="toggleServerCheckbox('{{ s.id }}')" style="cursor: pointer;">
                         <td><input class="form-check-input" type="checkbox" name="server_id" value="{{ s.id }}" id="server_{{ s.id }}" onclick="event.stopPropagation();"></td>
                         <td>{{ s.name }}</td>
                         <td class="code">{{ s.host }}</td>
@@ -2991,8 +2996,12 @@ TEMPLATE_INDEX = r"""
                         <td>{{ s.dbname }}</td>
                         <td>{{ s.username }}</td>
                         <td class="text-end">
-                          <button class="btn btn-outline-primary btn-sm me-1" type="button" onclick="editServer(event, {{ s.id }}, '{{ s.name }}', '{{ s.host }}', {{ s.port }}, '{{ s.dbname }}', '{{ s.username }}')">Düzenle</button>
-                          <button class="btn btn-outline-danger btn-sm" formmethod="post" formaction="{{ url_for('delete_server', sid=s.id) }}" formnovalidate onclick="return confirm('Silinsin mi?');">Sil</button>
+                          {% if s.get('is_inventory') %}
+                            <span class="badge bg-info text-dark">Envanter</span>
+                          {% else %}
+                            <button class="btn btn-outline-primary btn-sm me-1" type="button" onclick="editServer(event, {{ s.id }}, '{{ s.name }}', '{{ s.host }}', {{ s.port }}, '{{ s.dbname }}', '{{ s.username }}')">Düzenle</button>
+                            <button class="btn btn-outline-danger btn-sm" formmethod="post" formaction="{{ url_for('delete_server', sid=s.id) }}" formnovalidate onclick="return confirm('Silinsin mi?');">Sil</button>
+                          {% endif %}
                         </td>
                       </tr>
                       {% else %}
@@ -3981,32 +3990,58 @@ TEMPLATE_TOPLU_SUNUCU_EKLE = r"""
       
       function addAllToInventory() {
         if (confirm('Tüm sunucuları envantere eklemek istediğinizden emin misiniz?')) {
-          // Tüm sunucu bilgilerini tek tek envantere ekle
-          {% if results %}
-            {% for result in results %}
-              addSingleToInventory({
-                hostname: '{{ result.hostname }}',
-                ip: '{{ result.ip }}',
-                ssh_port: '{{ result.ssh_port }}',
-                ssh_user: '{{ result.ssh_user }}',
-                os_info: '{{ result.os_info }}',
-                cpu_info: '{{ result.cpu_info }}',
-                cpu_cores: '{{ result.cpu_cores }}',
-                ram_total: '{{ result.ram_total }}',
-                disks: {{ result.disks|tojson }},
-                uptime: '{{ result.uptime }}',
-                postgresql_status: '{{ result.postgresql_status }}',
-                postgresql_version: '{{ result.postgresql_version }}',
-                postgresql_replication: '{{ result.postgresql_replication }}',
-                pgbackrest_status: '{{ result.pgbackrest_status }}'
-              });
-            {% endfor %}
-          {% endif %}
+          const results = [
+            {% if results %}
+              {% for result in results %}
+                {
+                  hostname: '{{ result.hostname }}',
+                  ip: '{{ result.ip }}',
+                  ssh_port: '{{ result.ssh_port }}',
+                  ssh_user: '{{ result.ssh_user }}',
+                  ssh_password: '{{ result.ssh_password }}',
+                  os_info: '{{ result.os_info }}',
+                  cpu_info: '{{ result.cpu_info }}',
+                  cpu_cores: '{{ result.cpu_cores }}',
+                  ram_total: '{{ result.ram_total }}',
+                  disks: {{ result.disks|tojson }},
+                  uptime: '{{ result.uptime }}',
+                  postgresql_status: '{{ result.postgresql_status }}',
+                  postgresql_version: '{{ result.postgresql_version }}',
+                  postgresql_replication: '{{ result.postgresql_replication }}',
+                  pgbackrest_status: '{{ result.pgbackrest_status }}'
+                }{% if not loop.last %},{% endif %}
+              {% endfor %}
+            {% endif %}
+          ];
           
-          alert('Tüm sunucular envantere eklendi!');
-          setTimeout(() => {
-            window.location.href = '/sunuculari-listele';
-          }, 1000);
+          console.log('Toplam sunucu sayısı:', results.length);
+          let completed = 0;
+          let errors = 0;
+          
+          // Her sunucuyu sırayla ekle
+          results.forEach((serverData, index) => {
+            setTimeout(() => {
+              addSingleToInventoryAsync(serverData, index + 1, results.length)
+                .then(() => {
+                  completed++;
+                  console.log(`Sunucu ${index + 1}/${results.length} eklendi: ${serverData.hostname}`);
+                  
+                  if (completed + errors === results.length) {
+                    alert(`İşlem tamamlandı! ${completed} sunucu eklendi, ${errors} hata.`);
+                    window.location.href = '/sunuculari-listele';
+                  }
+                })
+                .catch((error) => {
+                  errors++;
+                  console.error(`Sunucu ${index + 1} eklenemedi: ${serverData.hostname}`, error);
+                  
+                  if (completed + errors === results.length) {
+                    alert(`İşlem tamamlandı! ${completed} sunucu eklendi, ${errors} hata.`);
+                    window.location.href = '/sunuculari-listele';
+                  }
+                });
+            }, index * 500); // Her sunucu arasında 500ms bekle
+          });
         }
       }
       
@@ -4027,6 +4062,31 @@ TEMPLATE_TOPLU_SUNUCU_EKLE = r"""
         document.body.appendChild(form);
         form.submit();
         document.body.removeChild(form);
+      }
+      
+      function addSingleToInventoryAsync(serverData, current, total) {
+        return new Promise((resolve, reject) => {
+          const formData = new FormData();
+          
+          for (const [key, value] of Object.entries(serverData)) {
+            formData.append(key, value);
+          }
+          
+          fetch('/envantere-ekle', {
+            method: 'POST',
+            body: formData
+          })
+          .then(response => {
+            if (response.ok) {
+              resolve(response);
+            } else {
+              reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+            }
+          })
+          .catch(error => {
+            reject(error);
+          });
+        });
       }
     </script>
     
@@ -4854,11 +4914,18 @@ def landing():
 @app.route("/multiquery")
 @require_auth("multiquery")
 def multiquery():
-    servers = db_query("SELECT * FROM servers ORDER BY id DESC")
+    # Manuel eklenen sunucular (servers tablosu)
+    manual_servers = db_query("SELECT * FROM servers ORDER BY id DESC")
+    
+    # Envanter sunucuları boş başlatılır - sadece butona tıklandığında yüklenecek
+    inventory_servers = []
+    
     return render_template_string(
         TEMPLATE_INDEX,
         title=APP_TITLE,
-        servers=servers,
+        servers=manual_servers,
+        manual_servers=manual_servers,
+        inventory_servers=inventory_servers,
         MAX_ROWS=MAX_ROWS,
         STMT_TIMEOUT_MS=STMT_TIMEOUT_MS,
         theme_script=THEME_SCRIPT,
@@ -4872,6 +4939,87 @@ def envanter():
     log_activity(session['user_id'], session['username'], 'envanter_access', 
                 'Envanter ana sayfasını ziyaret etti', 'envanter')
     return render_template_string(TEMPLATE_ENVANTER, theme_script=THEME_SCRIPT)
+
+# Envanter sunucularını yükle
+@app.route("/load-inventory-servers")
+@require_auth("multiquery")
+def load_inventory_servers():
+    # Envanterdeki sunucular (sunucu_envanteri tablosu) - PostgreSQL varsa
+    inventory_servers = []
+    try:
+        inventory_data = db_query("""
+            SELECT hostname, ip, ssh_port, ssh_user, ssh_password, postgresql_status, postgresql_version
+            FROM sunucu_envanteri 
+            WHERE postgresql_status = 'Var' 
+            ORDER BY created_at DESC
+        """)
+        
+        # Envanter sunucularını servers formatına dönüştür
+        for inv_server in inventory_data:
+            # Şifreyi çöz
+            decrypted_password = decrypt_password(inv_server['ssh_password']) if inv_server['ssh_password'] else ''
+            
+            # PostgreSQL port'unu tespit et (SSH ile bağlanarak)
+            postgres_port = 5432  # Varsayılan port
+            
+            try:
+                if decrypted_password:
+                    import paramiko
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(hostname=inv_server['ip'], port=int(inv_server['ssh_port']), 
+                               username=inv_server['ssh_user'], password=decrypted_password, timeout=5)
+                    
+                    # PostgreSQL port'unu tespit et
+                    stdin, stdout, stderr = ssh.exec_command("netstat -tlnp 2>/dev/null | grep postgres | head -1 | awk '{print $4}' | cut -d: -f2")
+                    port_output = stdout.read().decode().strip()
+                    if port_output and port_output.isdigit():
+                        postgres_port = int(port_output)
+                    else:
+                        stdin, stdout, stderr = ssh.exec_command("ss -tlnp 2>/dev/null | grep postgres | head -1 | awk '{print $4}' | cut -d: -f2")
+                        port_output = stdout.read().decode().strip()
+                        if port_output and port_output.isdigit():
+                            postgres_port = int(port_output)
+                    
+                    ssh.close()
+            except Exception as e:
+                print(f"Port tespit hatası {inv_server['hostname']}: {e}")
+                postgres_port = 5432  # Hata durumunda varsayılan port
+            
+            # PostgreSQL bağlantı bilgilerini ayarla
+            inventory_servers.append({
+                'id': f"inv_{inv_server['hostname']}",  # Envanter sunucuları için özel ID
+                'name': f"{inv_server['hostname']} (Envanter)",
+                'host': inv_server['ip'],
+                'port': postgres_port,
+                'dbname': 'postgres',
+                'username': 'postgres',
+                'password': decrypted_password,
+                'ssh_port': inv_server['ssh_port'],
+                'ssh_user': inv_server['ssh_user'],
+                'postgresql_status': inv_server['postgresql_status'],
+                'postgresql_version': inv_server['postgresql_version'],
+                'is_inventory': True
+            })
+    except Exception as e:
+        print(f"Envanter sunucuları alınırken hata: {e}")
+    
+    # Manuel sunucuları da al
+    manual_servers = db_query("SELECT * FROM servers ORDER BY id DESC")
+    
+    # Tüm sunucuları birleştir
+    all_servers = manual_servers + inventory_servers
+    
+    return render_template_string(
+        TEMPLATE_INDEX,
+        title=APP_TITLE,
+        servers=all_servers,
+        manual_servers=manual_servers,
+        inventory_servers=inventory_servers,
+        MAX_ROWS=MAX_ROWS,
+        STMT_TIMEOUT_MS=STMT_TIMEOUT_MS,
+        theme_script=THEME_SCRIPT,
+    )
 
 # Healthcheck sayfası
 @app.route("/healthcheck")
@@ -5005,6 +5153,10 @@ def toplu_sunucu_ekle():
             # İlk sütundan sunucu isimlerini al
             server_names = df.iloc[:, 0].dropna().astype(str).tolist()
             
+            # Debug bilgisi
+            print(f"Excel'den okunan sunucu sayısı: {len(server_names)}")
+            print(f"Sunucu isimleri: {server_names}")
+            
             if not server_names:
                 flash("Excel dosyasında sunucu ismi bulunamadı.", "danger")
                 return render_template_string(TEMPLATE_TOPLU_SUNUCU_EKLE, theme_script=THEME_SCRIPT)
@@ -5015,25 +5167,33 @@ def toplu_sunucu_ekle():
             
             # Her sunucu için bilgi topla
             results = []
-            for hostname in server_names:
+            for i, hostname in enumerate(server_names, 1):
                 try:
+                    print(f"Sunucu {i}/{len(server_names)} işleniyor: {hostname}")
+                    
                     # Hostname'i IP'ye çevirmeye çalış
                     try:
                         ip = socket.gethostbyname(hostname)
-                    except:
+                        print(f"  IP adresi: {ip}")
+                    except Exception as e:
                         ip = hostname  # IP çevrilemezse hostname'i kullan
+                        print(f"  IP çözülemedi, hostname kullanılıyor: {hostname} (Hata: {e})")
                     
                     # Sunucu bilgilerini topla
+                    print(f"  SSH bağlantısı deneniyor...")
                     server_info = collect_server_info(hostname, ip, ssh_port, ssh_user, ssh_password)
                     results.append(server_info)
+                    print(f"  ✅ Başarılı: {hostname}")
                     
                 except Exception as e:
+                    print(f"  ❌ Hata: {hostname} - {str(e)}")
                     # Hata durumunda boş bilgi ekle
                     results.append({
                         'hostname': hostname,
                         'ip': 'Bağlanamadı',
                         'ssh_port': ssh_port,
                         'ssh_user': ssh_user,
+                        'ssh_password': ssh_password,  # Şifreyi de ekle
                         'os_info': 'N/A',
                         'cpu_info': 'N/A',
                         'cpu_cores': 'N/A',
@@ -5128,16 +5288,27 @@ def sunucu_excel_export():
         # Sunucu verilerini Excel formatına dönüştür
         excel_data = []
         for server in servers:
-            # Disk bilgilerini parse et
+            # Disk bilgilerini formatla
             import json
             try:
-                disks = json.loads(server['disks']) if server['disks'] else []
+                # Disks alanı zaten dictionary ise direkt kullan
+                if isinstance(server['disks'], list):
+                    disks = server['disks']
+                elif isinstance(server['disks'], str):
+                    disks = json.loads(server['disks']) if server['disks'] else []
+                else:
+                    disks = []
+                
                 disk_info = ""
                 for disk in disks:
-                    disk_info += f"{disk['device']} ({disk['mount']}): {disk['size']} toplam, {disk['used']} kullanılan, {disk['available']} boş, %{disk['percent']}\n"
+                    if isinstance(disk, dict):
+                        disk_info += f"{disk.get('device', 'N/A')} ({disk.get('mount', 'N/A')}): {disk.get('size', 'N/A')} toplam, {disk.get('used', 'N/A')} kullanılan, {disk.get('available', 'N/A')} boş, %{disk.get('percent', 'N/A')}\n"
+                    else:
+                        disk_info += str(disk) + "\n"
                 disk_info = disk_info.strip()
-            except:
-                disk_info = server['disks'] or "N/A"
+            except Exception as e:
+                print(f"Disk bilgisi formatlanırken hata: {e}")
+                disk_info = str(server['disks']) if server['disks'] else "N/A"
             
             excel_data.append({
                 'Hostname': server['hostname'],
@@ -5291,9 +5462,143 @@ def run_query():
         flash("En az bir sunucu seçin.", "warning")
         return redirect(url_for("multiquery"))
 
-    placeholders = _in_clause_placeholders(len(selected_ids))
-    rows = db_query(f"SELECT * FROM servers WHERE id IN ({placeholders})", tuple(map(int, selected_ids)))
-    servers = [dict(r) for r in rows]
+    # Seçilen sunucuları al (hem manuel hem envanter)
+    servers = []
+    for server_id in selected_ids:
+        if server_id.startswith('inv_'):
+            # Envanter sunucusu
+            hostname = server_id.replace('inv_', '')
+            inventory_data = db_query("""
+                SELECT hostname, ip, ssh_port, ssh_user, ssh_password, postgresql_status, postgresql_version
+                FROM sunucu_envanteri 
+                WHERE hostname = ? AND postgresql_status = 'Var'
+            """, (hostname,))
+            
+            if inventory_data:
+                inv_server = inventory_data[0]
+                decrypted_password = decrypt_password(inv_server['ssh_password']) if inv_server['ssh_password'] else ''
+                
+                # PostgreSQL port'unu tespit et
+                postgres_port = 5432  # Varsayılan port
+                
+                try:
+                    if decrypted_password:
+                        import paramiko
+                        ssh = paramiko.SSHClient()
+                        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                        ssh.connect(hostname=inv_server['ip'], port=int(inv_server['ssh_port']), 
+                                   username=inv_server['ssh_user'], password=decrypted_password, timeout=5)
+                        
+                        # PostgreSQL port'unu tespit et - detaylı kontrol
+                        print(f"Port tespit ediliyor: {inv_server['hostname']}")
+                        
+                        # Yöntem 1: netstat ile tüm PostgreSQL portlarını listele
+                        stdin, stdout, stderr = ssh.exec_command("netstat -tlnp 2>/dev/null | grep postgres")
+                        netstat_output = stdout.read().decode().strip()
+                        print(f"Netstat çıktısı: {netstat_output}")
+                        
+                        if netstat_output:
+                            lines = netstat_output.split('\n')
+                            for line in lines:
+                                if 'postgres' in line and 'LISTEN' in line:
+                                    parts = line.split()
+                                    if len(parts) >= 4:
+                                        address_port = parts[3]
+                                        if ':' in address_port:
+                                            port_part = address_port.split(':')[-1]
+                                            if port_part.isdigit():
+                                                postgres_port = int(port_part)
+                                                print(f"PostgreSQL port tespit edildi (netstat): {inv_server['hostname']} -> {postgres_port}")
+                                                break
+                        
+                        # Yöntem 2: ss komutu ile kontrol
+                        if postgres_port == 5432:
+                            stdin, stdout, stderr = ssh.exec_command("ss -tlnp 2>/dev/null | grep postgres")
+                            ss_output = stdout.read().decode().strip()
+                            print(f"SS çıktısı: {ss_output}")
+                            
+                            if ss_output:
+                                lines = ss_output.split('\n')
+                                for line in lines:
+                                    if 'postgres' in line and 'LISTEN' in line:
+                                        parts = line.split()
+                                        if len(parts) >= 4:
+                                            address_port = parts[3]
+                                            if ':' in address_port:
+                                                port_part = address_port.split(':')[-1]
+                                                if port_part.isdigit():
+                                                    postgres_port = int(port_part)
+                                                    print(f"PostgreSQL port tespit edildi (ss): {inv_server['hostname']} -> {postgres_port}")
+                                                    break
+                        
+                        # Yöntem 3: PostgreSQL konfigürasyon dosyasından port oku
+                        if postgres_port == 5432:
+                            stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -t -c \"SHOW port;\" 2>/dev/null")
+                            psql_output = stdout.read().decode().strip()
+                            if psql_output and psql_output.isdigit():
+                                postgres_port = int(psql_output)
+                                print(f"PostgreSQL port tespit edildi (psql): {inv_server['hostname']} -> {postgres_port}")
+                        
+                        print(f"Final PostgreSQL port: {inv_server['hostname']} -> {postgres_port}")
+                        
+                        # PostgreSQL bağlantı testi
+                        try:
+                            import psycopg2
+                            test_conn = psycopg2.connect(
+                                host=inv_server['ip'],
+                                port=postgres_port,
+                                database='postgres',
+                                user='postgres',
+                                password=decrypted_password,
+                                connect_timeout=5
+                            )
+                            test_conn.close()
+                            print(f"PostgreSQL bağlantı testi başarılı: {inv_server['hostname']}:{postgres_port}")
+                        except Exception as conn_e:
+                            print(f"PostgreSQL bağlantı testi başarısız: {inv_server['hostname']}:{postgres_port} - {conn_e}")
+                            
+                            # Alternatif portları dene
+                            alternative_ports = [5433, 5434, 5435, 5436, 5437, 5438, 5439, 5440]
+                            for alt_port in alternative_ports:
+                                try:
+                                    test_conn = psycopg2.connect(
+                                        host=inv_server['ip'],
+                                        port=alt_port,
+                                        database='postgres',
+                                        user='postgres',
+                                        password=decrypted_password,
+                                        connect_timeout=3
+                                    )
+                                    test_conn.close()
+                                    postgres_port = alt_port
+                                    print(f"Alternatif port bulundu: {inv_server['hostname']}:{alt_port}")
+                                    break
+                                except:
+                                    continue
+                        
+                        ssh.close()
+                except Exception as e:
+                    print(f"Port tespit hatası {inv_server['hostname']}: {e}")
+                    postgres_port = 5432  # Hata durumunda varsayılan port
+                
+                servers.append({
+                    'id': server_id,
+                    'name': f"{inv_server['hostname']} (Envanter)",
+                    'host': inv_server['ip'],
+                    'port': postgres_port,
+                    'dbname': 'postgres',
+                    'username': 'postgres',
+                    'password': decrypted_password,
+                    'is_inventory': True
+                })
+        else:
+            # Manuel sunucu
+            try:
+                rows = db_query("SELECT * FROM servers WHERE id = ?", (int(server_id),))
+                if rows:
+                    servers.append(dict(rows[0]))
+            except:
+                pass
 
     results: List[Dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
@@ -5355,9 +5660,62 @@ def export_merged_csv():
         flash("Birleşik dışa aktarım için SQL ve sunucu seçimi gerekiyor.", "warning")
         return redirect(url_for("multiquery"))
 
-    placeholders = _in_clause_placeholders(len(ids))
-    rows = db_query(f"SELECT * FROM servers WHERE id IN ({placeholders})", tuple(map(int, ids)))
-    servers = [dict(r) for r in rows]
+    # Manuel ve envanter sunucularını ayır
+    manual_ids = []
+    inventory_ids = []
+    
+    for server_id in ids:
+        if server_id.startswith('inv_'):
+            inventory_ids.append(server_id.replace('inv_', ''))
+        else:
+            manual_ids.append(server_id)
+    
+    servers = []
+    
+    # Manuel sunucuları al
+    if manual_ids:
+        placeholders = _in_clause_placeholders(len(manual_ids))
+        rows = db_query(f"SELECT * FROM servers WHERE id IN ({placeholders})", tuple(map(int, manual_ids)))
+        servers.extend([dict(r) for r in rows])
+    
+    # Envanter sunucularını al
+    if inventory_ids:
+        placeholders = _in_clause_placeholders(len(inventory_ids))
+        inventory_rows = db_query(f"SELECT hostname, ip, ssh_port, ssh_user, ssh_password, postgresql_status, postgresql_version FROM sunucu_envanteri WHERE hostname IN ({placeholders})", tuple(inventory_ids))
+        
+        for inv_row in inventory_rows:
+            inv_server = dict(inv_row)
+            decrypted_password = decrypt_password(inv_server['ssh_password']) if inv_server['ssh_password'] else ''
+            
+            # PostgreSQL port'unu tespit et
+            postgres_port = 5432
+            try:
+                if decrypted_password:
+                    import paramiko
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(hostname=inv_server['ip'], port=int(inv_server['ssh_port']), 
+                               username=inv_server['ssh_user'], password=decrypted_password, timeout=5)
+                    
+                    # Port tespit et
+                    stdin, stdout, stderr = ssh.exec_command("netstat -tlnp 2>/dev/null | grep postgres | head -1 | awk '{print $4}' | cut -d: -f2")
+                    port_output = stdout.read().decode().strip()
+                    if port_output and port_output.isdigit():
+                        postgres_port = int(port_output)
+                    
+                    ssh.close()
+            except:
+                pass
+            
+            servers.append({
+                'id': f"inv_{inv_server['hostname']}",
+                'name': f"{inv_server['hostname']} (Envanter)",
+                'host': inv_server['ip'],
+                'port': postgres_port,
+                'dbname': 'postgres',
+                'username': 'postgres',
+                'password': decrypted_password
+            })
 
     results: List[Dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
@@ -5414,9 +5772,62 @@ def export_zip():
         flash("Dışa aktarım için SQL ve sunucu seçimi gerekiyor.", "warning")
         return redirect(url_for("multiquery"))
 
-    placeholders = _in_clause_placeholders(len(ids))
-    rows = db_query(f"SELECT * FROM servers WHERE id IN ({placeholders})", tuple(map(int, ids)))
-    servers = [dict(r) for r in rows]
+    # Manuel ve envanter sunucularını ayır
+    manual_ids = []
+    inventory_ids = []
+    
+    for server_id in ids:
+        if server_id.startswith('inv_'):
+            inventory_ids.append(server_id.replace('inv_', ''))
+        else:
+            manual_ids.append(server_id)
+    
+    servers = []
+    
+    # Manuel sunucuları al
+    if manual_ids:
+        placeholders = _in_clause_placeholders(len(manual_ids))
+        rows = db_query(f"SELECT * FROM servers WHERE id IN ({placeholders})", tuple(map(int, manual_ids)))
+        servers.extend([dict(r) for r in rows])
+    
+    # Envanter sunucularını al
+    if inventory_ids:
+        placeholders = _in_clause_placeholders(len(inventory_ids))
+        inventory_rows = db_query(f"SELECT hostname, ip, ssh_port, ssh_user, ssh_password, postgresql_status, postgresql_version FROM sunucu_envanteri WHERE hostname IN ({placeholders})", tuple(inventory_ids))
+        
+        for inv_row in inventory_rows:
+            inv_server = dict(inv_row)
+            decrypted_password = decrypt_password(inv_server['ssh_password']) if inv_server['ssh_password'] else ''
+            
+            # PostgreSQL port'unu tespit et
+            postgres_port = 5432
+            try:
+                if decrypted_password:
+                    import paramiko
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(hostname=inv_server['ip'], port=int(inv_server['ssh_port']), 
+                               username=inv_server['ssh_user'], password=decrypted_password, timeout=5)
+                    
+                    # Port tespit et
+                    stdin, stdout, stderr = ssh.exec_command("netstat -tlnp 2>/dev/null | grep postgres | head -1 | awk '{print $4}' | cut -d: -f2")
+                    port_output = stdout.read().decode().strip()
+                    if port_output and port_output.isdigit():
+                        postgres_port = int(port_output)
+                    
+                    ssh.close()
+            except:
+                pass
+            
+            servers.append({
+                'id': f"inv_{inv_server['hostname']}",
+                'name': f"{inv_server['hostname']} (Envanter)",
+                'host': inv_server['ip'],
+                'port': postgres_port,
+                'dbname': 'postgres',
+                'username': 'postgres',
+                'password': decrypted_password
+            })
 
     mem = BytesIO()
     with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
@@ -6471,6 +6882,101 @@ TEMPLATE_SUNUCULARI_LISTELE = r"""
   </body>
 </html>
 """
+
+
+@app.route("/test-server-connection")
+@require_auth("multiquery")
+def test_server_connection():
+    server_ip = request.args.get('ip', '192.168.1.3')
+    
+    # Envanter sunucusunu bul
+    inventory_data = db_query("""
+        SELECT hostname, ip, ssh_port, ssh_user, ssh_password, postgresql_status, postgresql_version
+        FROM sunucu_envanteri 
+        WHERE ip = ?
+    """, (server_ip,))
+    
+    if not inventory_data:
+        return f"Sunucu bulunamadı: {server_ip}"
+    
+    inv_server = inventory_data[0]
+    decrypted_password = decrypt_password(inv_server['ssh_password']) if inv_server['ssh_password'] else ''
+    
+    result = f"<h3>Sunucu Test Raporu: {inv_server['hostname']} ({server_ip})</h3>"
+    
+    # SSH bağlantı testi
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(hostname=inv_server['ip'], port=int(inv_server['ssh_port']), 
+                   username=inv_server['ssh_user'], password=decrypted_password, timeout=10)
+        
+        result += "<h4>✅ SSH Bağlantısı: BAŞARILI</h4>"
+        
+        # PostgreSQL servis durumu
+        stdin, stdout, stderr = ssh.exec_command("systemctl status postgresql")
+        service_output = stdout.read().decode()
+        result += f"<h4>PostgreSQL Servis Durumu:</h4><pre>{service_output}</pre>"
+        
+        # PostgreSQL process'leri
+        stdin, stdout, stderr = ssh.exec_command("ps aux | grep postgres | grep -v grep")
+        process_output = stdout.read().decode()
+        result += f"<h4>PostgreSQL Process'leri:</h4><pre>{process_output}</pre>"
+        
+        # Dinlenen portlar
+        stdin, stdout, stderr = ssh.exec_command("netstat -tlnp | grep postgres")
+        netstat_output = stdout.read().decode()
+        result += f"<h4>PostgreSQL Dinlenen Portlar (netstat):</h4><pre>{netstat_output}</pre>"
+        
+        stdin, stdout, stderr = ssh.exec_command("ss -tlnp | grep postgres")
+        ss_output = stdout.read().decode()
+        result += f"<h4>PostgreSQL Dinlenen Portlar (ss):</h4><pre>{ss_output}</pre>"
+        
+        # PostgreSQL konfigürasyonu
+        stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -t -c \"SHOW port;\" 2>/dev/null")
+        port_output = stdout.read().decode().strip()
+        result += f"<h4>PostgreSQL Konfigürasyon Port:</h4><pre>{port_output}</pre>"
+        
+        stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -t -c \"SHOW listen_addresses;\" 2>/dev/null")
+        listen_output = stdout.read().decode().strip()
+        result += f"<h4>PostgreSQL Listen Addresses:</h4><pre>{listen_output}</pre>"
+        
+        # PostgreSQL konfigürasyon dosyası
+        stdin, stdout, stderr = ssh.exec_command("find /etc/postgresql -name 'postgresql.conf' 2>/dev/null | head -1")
+        config_file = stdout.read().decode().strip()
+        if config_file:
+            stdin, stdout, stderr = ssh.exec_command(f"grep -E '^(port|listen_addresses)' {config_file} 2>/dev/null")
+            config_output = stdout.read().decode()
+            result += f"<h4>PostgreSQL Konfigürasyon Dosyası ({config_file}):</h4><pre>{config_output}</pre>"
+        
+        ssh.close()
+        
+    except Exception as e:
+        result += f"<h4>❌ SSH Bağlantı Hatası:</h4><pre>{str(e)}</pre>"
+    
+    # PostgreSQL bağlantı testleri
+    result += "<h4>PostgreSQL Bağlantı Testleri:</h4>"
+    test_ports = [5432, 5433, 5434, 5435, 5436, 5437, 5438, 5439, 5440]
+    
+    for test_port in test_ports:
+        try:
+            import psycopg2
+            test_conn = psycopg2.connect(
+                host=server_ip,
+                port=test_port,
+                database='postgres',
+                user='postgres',
+                password=decrypted_password,
+                connect_timeout=3
+            )
+            test_conn.close()
+            result += f"✅ Port {test_port}: BAŞARILI<br>"
+            break
+        except Exception as e:
+            result += f"❌ Port {test_port}: {str(e)}<br>"
+    
+    return result
 
 
 if __name__ == "__main__":
