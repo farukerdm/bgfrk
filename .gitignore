@@ -26,8 +26,10 @@ venv/
 ENV/
 env/
 
-# Keep main code file
+# Keep main code files
 !.venv/anasayfa.py
+!.venv/fix_with_symbols.py
+!.venv/pstandaloneinstall.py
 
 # IDE
 .vscode/
