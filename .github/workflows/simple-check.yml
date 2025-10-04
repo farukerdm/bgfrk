@@ -26,12 +26,14 @@ jobs:
     - name: Run basic tests
       run: |
         echo "Running basic Python tests..."
+        cd .venv
         python test_basic.py
         echo "✅ Basic tests completed!"
     
     - name: Check Python syntax (optional)
       run: |
         echo "Checking Python syntax..."
+        cd .venv
         if [ -f "anasayfa.py" ]; then
           python -m py_compile anasayfa.py || echo "⚠️ anasayfa.py syntax check failed"
         fi
@@ -47,6 +49,7 @@ jobs:
     - name: Simple import test
       run: |
         echo "Testing basic imports..."
+        cd .venv
         python -c "import flask; print('✅ Flask import: OK')" || echo "⚠️ Flask not available"
         python -c "import sqlite3; print('✅ SQLite import: OK')" || echo "⚠️ SQLite not available"
         echo "✅ Import tests completed!"

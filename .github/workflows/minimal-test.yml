@@ -38,5 +38,6 @@ jobs:
     
     - name: Test Flask import
       run: |
+        cd .venv
         python -c "import flask; print('Flask version:', flask.__version__)"
         echo "✅ Flask import works"

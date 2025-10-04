@@ -20,16 +20,27 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# Virtual Environment - but keep our code files
 .venv/
 venv/
 ENV/
 env/
 
-# Keep main code files
+# Keep our main code files in .venv
 !.venv/anasayfa.py
 !.venv/fix_with_symbols.py
 !.venv/pstandaloneinstall.py
+!.venv/test_basic.py
+!.venv/auto_save.py
+!.venv/requirements.txt
+!.venv/README.md
+
+# Ignore virtual environment packages
+.venv/Lib/
+.venv/Scripts/
+.venv/Include/
+.venv/__pycache__/
+.venv/pyvenv.cfg
 
 # IDE
 .vscode/
