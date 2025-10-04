@@ -20,15 +20,19 @@ class GitAutoCommitHandler(FileSystemEventHandler):
         if event.is_directory:
             return
             
-        # Sadece Python, HTML, CSS, JS dosyalarını takip et
-        if event.src_path.endswith(('.py', '.html', '.css', '.js', '.txt', '.md')):
+        # Sadece Python, HTML, CSS, JS dosyalarını takip et (ana klasörde)
+        if (event.src_path.endswith(('.py', '.html', '.css', '.js', '.txt', '.md')) and 
+            not '.venv' in event.src_path and 
+            not '.git' in event.src_path):
             self.auto_commit()
     
     def on_created(self, event):
         if event.is_directory:
             return
             
-        if event.src_path.endswith(('.py', '.html', '.css', '.js', '.txt', '.md')):
+        if (event.src_path.endswith(('.py', '.html', '.css', '.js', '.txt', '.md')) and 
+            not '.venv' in event.src_path and 
+            not '.git' in event.src_path):
             self.auto_commit()
     
     def auto_commit(self):
