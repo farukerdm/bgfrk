@@ -39,11 +39,13 @@ jobs:
       run: |
         echo "Checking code formatting with black..."
         black --check --diff . || echo "Code formatting issues found. Run 'black .' to fix."
+      continue-on-error: true
     
     - name: Import sorting check with isort
       run: |
         echo "Checking import sorting with isort..."
         isort --check-only --diff . || echo "Import sorting issues found. Run 'isort .' to fix."
+      continue-on-error: true
     
     - name: Lint with pylint
       run: |
@@ -72,11 +74,14 @@ jobs:
         EOF
         fi
         
-        # Run pylint on Python files
-        find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" -not -path "./.git/*" | xargs pylint --output-format=text || true
-        
-        # Generate pylint report
-        find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" -not -path "./.git/*" | xargs pylint --output-format=json > pylint-report.json || true
+        # Run pylint on Python files (skip if no files found)
+        python_files=$(find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" -not -path "./.git/*")
+        if [ -n "$python_files" ]; then
+          echo "$python_files" | xargs pylint --output-format=text || true
+          echo "$python_files" | xargs pylint --output-format=json > pylint-report.json || true
+        else
+          echo "[]" > pylint-report.json
+        fi
     
     - name: Upload pylint results
       uses: actions/upload-artifact@v3
