@@ -1,0 +1,54 @@
+name: Simple Code Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+    
+    - name: Run basic tests
+      run: |
+        echo "Running basic Python tests..."
+        python test_basic.py
+        echo "✅ Basic tests passed!"
+    
+    - name: Check Python syntax
+      run: |
+        echo "Checking Python syntax..."
+        python -m py_compile anasayfa.py
+        python -m py_compile fix_with_symbols.py
+        python -m py_compile pstandaloneinstall.py
+        echo "✅ Python syntax check passed!"
+    
+    - name: Simple import test
+      run: |
+        echo "Testing imports..."
+        python -c "import flask; print('Flask import: OK')"
+        python -c "import pandas; print('Pandas import: OK')"
+        python -c "import sqlite3; print('SQLite import: OK')"
+        echo "✅ Import tests passed!"
+    
+    - name: File structure check
+      run: |
+        echo "Checking file structure..."
+        ls -la *.py
+        ls -la requirements.txt
+        echo "✅ File structure check passed!"
