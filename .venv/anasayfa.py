@@ -327,6 +327,140 @@ def init_sunucu_envanteri_table():
     except Exception as e:
         print(f"Sunucu envanteri tablosu oluşturulurken hata: {e}")
 
+def init_healthcheck_table():
+    """Healthcheck sonuçları tablosunu oluştur"""
+    try:
+        db_execute("""
+            CREATE TABLE IF NOT EXISTS healthcheck_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER NOT NULL,
+                hostname TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                status TEXT NOT NULL,
+                os_info TEXT,
+                cpu_info TEXT,
+                cpu_cores TEXT,
+                ram_total TEXT,
+                ram_used TEXT,
+                ram_free TEXT,
+                disks TEXT,
+                uptime TEXT,
+                postgresql_status TEXT,
+                postgresql_version TEXT,
+                postgresql_replication TEXT,
+                pgbackrest_status TEXT,
+                network_info TEXT,
+                load_average TEXT,
+                kernel_version TEXT,
+                architecture TEXT,
+                last_boot TEXT,
+                swap_memory TEXT,
+                memory_detailed TEXT,
+                top_cpu_processes TEXT,
+                top_memory_processes TEXT,
+                disk_io_stats TEXT,
+                network_interfaces TEXT,
+                dns_servers TEXT,
+                timezone TEXT,
+                running_services TEXT,
+                failed_services TEXT,
+                listening_ports TEXT,
+                total_connections TEXT,
+                pg_connection_count TEXT,
+                pg_max_connections TEXT,
+                pg_databases TEXT,
+                pg_total_size TEXT,
+                pg_data_directory TEXT,
+                pg_port TEXT,
+                pg_shared_buffers TEXT,
+                pg_work_mem TEXT,
+                pg_effective_cache_size TEXT,
+                pg_maintenance_work_mem TEXT,
+                pg_wal_level TEXT,
+                pg_archive_mode TEXT,
+                pg_replication_slots TEXT,
+                pg_uptime TEXT,
+                error_message TEXT,
+                checked_by INTEGER NOT NULL,
+                checked_by_username TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (server_id) REFERENCES sunucu_envanteri (id),
+                FOREIGN KEY (checked_by) REFERENCES users (id)
+            )
+        """)
+        print("healthcheck_results tablosu oluşturuldu.")
+        
+        # Tüm eksik sütunları ekle (eğer yoksa) - tek tek kontrol edelim
+        migration_columns = [
+            ('kernel_version', 'TEXT'),
+            ('architecture', 'TEXT'),
+            ('last_boot', 'TEXT'),
+            ('swap_memory', 'TEXT'),
+            ('memory_detailed', 'TEXT'),
+            ('top_cpu_processes', 'TEXT'),
+            ('top_memory_processes', 'TEXT'),
+            ('disk_io_stats', 'TEXT'),
+            ('network_interfaces', 'TEXT'),
+            ('dns_servers', 'TEXT'),
+            ('timezone', 'TEXT'),
+            ('running_services', 'TEXT'),
+            ('failed_services', 'TEXT'),
+            ('listening_ports', 'TEXT'),
+            ('total_connections', 'TEXT'),
+            ('kernel_params', 'TEXT'),
+            ('kernel_params_summary', 'TEXT'),
+            ('pg_connection_count', 'TEXT'),
+            ('pg_max_connections', 'TEXT'),
+            ('pg_databases', 'TEXT'),
+            ('pg_total_size', 'TEXT'),
+            ('pg_data_directory', 'TEXT'),
+            ('pg_port', 'TEXT'),
+            ('pg_shared_buffers', 'TEXT'),
+            ('pg_work_mem', 'TEXT'),
+            ('pg_effective_cache_size', 'TEXT'),
+            ('pg_maintenance_work_mem', 'TEXT'),
+            ('pg_wal_level', 'TEXT'),
+            ('pg_archive_mode', 'TEXT'),
+            ('pg_replication_slots', 'TEXT'),
+            ('pg_uptime', 'TEXT'),
+            ('system_update_status', 'TEXT'),
+            ('system_update_message', 'TEXT'),
+            ('pgbackrest_details', 'TEXT'),
+            ('pg_probackup_status', 'TEXT'),
+            ('pg_probackup_path', 'TEXT'),
+            ('pg_probackup_details', 'TEXT'),
+            ('pgbarman_status', 'TEXT'),
+            ('pgbarman_details', 'TEXT'),
+            ('backup_info', 'TEXT'),
+            ('disk_type', 'TEXT'),
+            ('disk_write_speed', 'TEXT'),
+            ('disk_read_speed', 'TEXT'),
+            ('disk_performance_test', 'TEXT'),
+            ('patroni_status', 'TEXT'),
+            ('patroni_details', 'TEXT'),
+            ('repmgr_status', 'TEXT'),
+            ('repmgr_details', 'TEXT'),
+            ('paf_status', 'TEXT'),
+            ('paf_details', 'TEXT'),
+            ('citus_status', 'TEXT'),
+            ('citus_details', 'TEXT'),
+            ('streaming_replication_status', 'TEXT'),
+            ('streaming_replication_details', 'TEXT'),
+            ('ha_tools_summary', 'TEXT'),
+        ]
+        
+        for col_name, col_type in migration_columns:
+            try:
+                db_execute(f"ALTER TABLE healthcheck_results ADD COLUMN {col_name} {col_type}")
+                print(f"{col_name} sütunu eklendi.")
+            except:
+                pass  # Sütun zaten varsa hata vermez
+        
+        # Tüm migration'lar yukarıda yapılıyor artık
+            
+    except Exception as e:
+        print(f"Healthcheck tablosu oluşturulurken hata: {e}")
+
 def save_sunucu_bilgileri(server_info):
     """Sunucu bilgilerini veritabanına kaydet (varsa güncelle, yoksa ekle)"""
     try:
@@ -898,13 +1032,23 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
                 
                 # PostgreSQL server versiyonu - birden fazla yöntem dene
                 try:
-                    # Yöntem 1: PostgreSQL server versiyonu (en güvenilir)
-                    stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -c 'SELECT version();' 2>/dev/null | grep PostgreSQL")
+                    # Yöntem 1: psql --version (doesn't require sudo)
+                    stdin, stdout, stderr = ssh.exec_command("psql --version 2>/dev/null")
                     pg_version = stdout.read().decode().strip()
                     
-                    # Yöntem 2: Eğer yukarısı çalışmazsa, postgres server binary versiyonu
+                    # Yöntem 2: pg_config --version
                     if not pg_version or 'PostgreSQL' not in pg_version:
-                        stdin, stdout, stderr = ssh.exec_command("sudo -u postgres postgres --version 2>/dev/null")
+                        stdin, stdout, stderr = ssh.exec_command("pg_config --version 2>/dev/null")
+                        pg_version = stdout.read().decode().strip()
+                    
+                    # Yöntem 3: PostgreSQL server versiyonu (with sudo)
+                    if not pg_version or 'PostgreSQL' not in pg_version:
+                        stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c 'SELECT version();' 2>/dev/null")
+                        pg_version = stdout.read().decode().strip()
+                    
+                    # Yöntem 4: postgres server binary versiyonu
+                    if not pg_version or 'PostgreSQL' not in pg_version:
+                        stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres postgres --version 2>/dev/null")
                         pg_version = stdout.read().decode().strip()
                     
                     # Yöntem 3: Eğer hala çalışmazsa, pg_config ile versiyon
@@ -958,7 +1102,7 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
                 
                 # Replication durumu
                 try:
-                    stdin, stdout, stderr = ssh.exec_command("sudo -u postgres psql -c 'SELECT client_addr FROM pg_stat_replication LIMIT 1;' 2>/dev/null | grep -v 'client_addr\\|^-\\|^$'")
+                    stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c 'SELECT client_addr FROM pg_stat_replication LIMIT 1;' 2>/dev/null")
                     replication_info = stdout.read().decode().strip()
                     if replication_info:
                         server_info['postgresql_replication'] = 'Var'
@@ -4450,6 +4594,7 @@ TEMPLATE_HEALTHCHECK = r"""
         color: var(--txt); 
         font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
         padding-top: 20px;
+        min-height: 100vh;
       }
       
       .container-lg { 
@@ -4457,7 +4602,9 @@ TEMPLATE_HEALTHCHECK = r"""
         border-radius: 1rem; 
         padding: 2rem; 
         margin-top: 1rem; 
+        margin-bottom: 2rem;
         border: 1px solid var(--border);
+        max-width: 1400px;
       }
       
       .header { 
@@ -4499,11 +4646,22 @@ TEMPLATE_HEALTHCHECK = r"""
         color: white;
       }
       
-      .btn-primary:hover { 
+      .btn-primary:hover:not(:disabled) { 
         background: var(--accent); 
         border-color: var(--accent); 
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      }
+      
+      .btn-success {
+        background: #10b981;
+        border-color: #10b981;
+        color: white;
+      }
+      
+      .btn-success:hover:not(:disabled) {
+        background: #059669;
+        border-color: #059669;
       }
       
       .btn-outline-secondary { 
@@ -4535,11 +4693,282 @@ TEMPLATE_HEALTHCHECK = r"""
         border-color: var(--brand); 
       }
       
+      /* Server List Styling */
+      .server-list {
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        background: var(--hover);
+      }
+      
+      .server-item {
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        border: 1px solid var(--border);
+        border-radius: 0.5rem;
+        background: var(--panel);
+        transition: all 0.2s ease;
+      }
+      
+      .server-item:hover {
+        background: var(--hover);
+        transform: translateX(5px);
+      }
+      
+      .server-item label {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        margin: 0;
+      }
+      
+      .server-item input[type="checkbox"] {
+        margin-right: 0.75rem;
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+      }
+      
+      /* Results Styling */
+      .result-card {
+        border-left: 4px solid;
+        margin-bottom: 1rem;
+        padding: 1.25rem;
+        border-radius: 0.5rem;
+        background: var(--hover);
+      }
+      
+      .result-card.success {
+        border-left-color: #10b981;
+      }
+      
+      .result-card.error {
+        border-left-color: #ef4444;
+      }
+      
+      .result-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
+      
+      .result-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.25rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+      
+      .result-badge.success {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+      }
+      
+      .result-badge.error {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
+      
+      .result-details {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      
+      .detail-item {
+        padding: 0.75rem;
+        background: var(--panel);
+        border-radius: 0.5rem;
+        border: 1px solid var(--border);
+      }
+      
+      .detail-label {
+        font-size: 0.875rem;
+        color: var(--muted);
+        margin-bottom: 0.25rem;
+      }
+      
+      .detail-value {
+        font-weight: 500;
+        color: var(--txt);
+      }
+      
+      /* Loading Spinner */
+      .spinner {
+        border: 3px solid var(--border);
+        border-top: 3px solid var(--brand);
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      
+      .loading-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 9999;
+        align-items: center;
+        justify-content: center;
+      }
+      
+      .loading-content {
+        background: var(--panel);
+        padding: 2rem;
+        border-radius: 1rem;
+        text-align: center;
+        border: 1px solid var(--border);
+      }
+      
+      /* Scrollbar Styling */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      
+      ::-webkit-scrollbar-track {
+        background: var(--panel);
+      }
+      
+      ::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+      }
+      
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--brand);
+      }
+      
       .text-muted { color: var(--muted) !important; }
       p, div, span, td, th, label, h1, h2, h3, h4, h5, h6 { color: var(--txt); }
+      
+      .table {
+        color: var(--txt);
+      }
+      
+      .table th {
+        background: var(--hover);
+        border-color: var(--border);
+      }
+      
+      .table td {
+        border-color: var(--border);
+      }
+      
+      .table-hover tbody tr:hover {
+        background: var(--hover);
+      }
+      
+      /* Detail Modal Styling */
+      .modal-content {
+        background: var(--panel);
+        color: var(--txt);
+        border: 1px solid var(--border);
+      }
+      
+      .modal-header {
+        border-bottom: 1px solid var(--border);
+      }
+      
+      .modal-footer {
+        border-top: 1px solid var(--border);
+      }
+      
+      .detail-section {
+        margin-bottom: 2rem;
+        padding-bottom: 1.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      
+      .detail-section:last-child {
+        border-bottom: none;
+      }
+      
+      .detail-section-title {
+        color: var(--txt);
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid var(--brand);
+      }
+      
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 0.75rem;
+      }
+      
+      .detail-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.5rem;
+        background: var(--hover);
+        border-radius: 0.25rem;
+        align-items: center;
+      }
+      
+      .detail-row .detail-label {
+        font-weight: 600;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      
+      .detail-row .detail-value {
+        color: var(--txt);
+        text-align: right;
+        font-weight: 500;
+      }
+      
+      .modal-body {
+        max-height: 70vh;
+        overflow-y: auto;
+      }
+      
+      .btn-close {
+        filter: invert(1);
+      }
+      
+      [data-theme="light"] .btn-close {
+        filter: invert(0);
+      }
+      
+      /* Animations */
+      @keyframes slideIn {
+        from {
+          width: 0%;
+          opacity: 0.5;
+        }
+        to {
+          width: var(--target-width);
+          opacity: 1;
+        }
+      }
     </style>
   </head>
   <body>
+    <div class="loading-overlay" id="loadingOverlay">
+      <div class="loading-content">
+        <div class="spinner"></div>
+        <p class="mt-3 mb-0">Healthcheck çalıştırılıyor...</p>
+        <p class="text-muted mb-0" style="font-size: 0.875rem;">Lütfen bekleyin</p>
+      </div>
+    </div>
+    
     <div class="container-lg">
       <div class="header">
         <h1>🏥 Healthcheck</h1>
@@ -4554,24 +4983,126 @@ TEMPLATE_HEALTHCHECK = r"""
       <div class="row">
         <div class="col-md-12">
           <div class="card">
-            <h3>Healthcheck Modülü</h3>
-            <p class="text-muted">
-              Bu bölümde sunucu sağlık kontrolleri ve izleme işlemlerini gerçekleştirebileceksiniz.
-              Aşağıdaki özellikleri yakında kullanıma açılacaktır:
-            </p>
-            <ul class="text-muted">
-              <li>PostgreSQL sunucu sağlık kontrolü</li>
-              <li>Sistem kaynak kullanımı izleme</li>
-              <li>Disk doluluk oranları takibi</li>
-              <li>Veritabanı bağlantı testleri</li>
-              <li>Replication lag kontrolü</li>
-              <li>Backup durumu kontrolü</li>
-              <li>Otomatik periyodik sağlık raporları</li>
-            </ul>
-            <div class="alert alert-info mt-3" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 0.5rem; padding: 1rem;">
-              <strong>🚧 Geliştirme Aşamasında</strong><br>
-              Bu özellik aktif olarak geliştirilmektedir. Yakında kullanıma açılacaktır.
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+              <h3 style="margin: 0;">Sunucu Seçimi</h3>
+              <div>
+                <button class="btn btn-outline-secondary btn-sm me-2" onclick="selectAllServers()">Tümünü Seç</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="deselectAllServers()">Seçimi Temizle</button>
+              </div>
             </div>
+            
+            <p class="text-muted mb-3">
+              Healthcheck yapılacak sunucuları seçin. Seçilen sunucular üzerinde sistem bilgileri toplanacak ve kaydedilecektir.
+            </p>
+            
+            <div class="server-list" id="serverList">
+              {% if servers %}
+                {% for server in servers %}
+                <div class="server-item">
+                  <label>
+                    <input type="checkbox" name="server_ids" value="{{ server.id }}" class="server-checkbox">
+                    <div>
+                      <strong>{{ server.hostname }}</strong>
+                      <span class="text-muted" style="font-size: 0.875rem;"> - {{ server.ip }}:{{ server.ssh_port }}</span>
+                      {% if server.postgresql_status %}
+                      <span class="badge bg-success" style="font-size: 0.75rem; margin-left: 0.5rem;">PostgreSQL</span>
+                      {% endif %}
+                    </div>
+                  </label>
+                </div>
+                {% endfor %}
+              {% else %}
+                <div class="alert alert-warning" style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 0.5rem; padding: 1rem;">
+                  <strong>⚠️ Sunucu Bulunamadı</strong><br>
+                  Envanter'de kayıtlı sunucu bulunmamaktadır. Önce sunucu eklemeniz gerekmektedir.
+                </div>
+              {% endif %}
+            </div>
+            
+            <div class="mt-3">
+              <button class="btn btn-success btn-lg" onclick="runHealthcheck()" id="runButton" {% if not servers %}disabled{% endif %}>
+                🚀 Healthcheck Çalıştır (<span id="selectedCount">0</span> sunucu)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div id="resultsContainer"></div>
+      
+      <!-- Healthcheck Geçmişi -->
+      <div class="row mt-4">
+        <div class="col-md-12">
+          <div class="card">
+            <h3>📊 Healthcheck Geçmişi</h3>
+            <p class="text-muted mb-3">Son healthcheck sonuçları</p>
+            
+            <div class="table-responsive">
+              <table class="table table-hover">
+                <thead>
+                  <tr>
+                    <th>Tarih</th>
+                    <th>Sunucu</th>
+                    <th>IP</th>
+                    <th>Durum</th>
+                    <th>CPU</th>
+                    <th>RAM</th>
+                    <th>PostgreSQL</th>
+                    <th>Kontrol Eden</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% if history %}
+                    {% for record in history %}
+                    <tr>
+                      <td style="font-size: 0.875rem;">{{ record.created_at }}</td>
+                      <td><strong>{{ record.hostname }}</strong></td>
+                      <td class="text-muted">{{ record.ip }}</td>
+                      <td>
+                        {% if record.status == 'success' %}
+                          <span class="result-badge success">✓ Başarılı</span>
+                        {% else %}
+                          <span class="result-badge error">✗ Hata</span>
+                        {% endif %}
+                      </td>
+                      <td>{{ record.cpu_info or 'N/A' }}</td>
+                      <td>{{ record.ram_total or 'N/A' }}</td>
+                      <td>
+                        {% if record.postgresql_status == 'Var' %}
+                          <span class="badge bg-success">Var</span>
+                        {% else %}
+                          <span class="badge bg-secondary">Yok</span>
+                        {% endif %}
+                      </td>
+                      <td class="text-muted">{{ record.checked_by_username }}</td>
+                    </tr>
+                    {% endfor %}
+                  {% else %}
+                    <tr>
+                      <td colspan="8" class="text-center text-muted">Henüz healthcheck geçmişi bulunmamaktadır.</td>
+                    </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Detail Modal -->
+    <div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="detailModalTitle">Detaylı Bilgiler</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="detailModalBody">
+            <p class="text-muted">Yükleniyor...</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Kapat</button>
           </div>
         </div>
       </div>
@@ -4602,6 +5133,872 @@ TEMPLATE_HEALTHCHECK = r"""
         localStorage.setItem('theme', newTheme);
       }
 
+      // Server selection
+      function updateSelectedCount() {
+        const checkboxes = document.querySelectorAll('.server-checkbox:checked');
+        document.getElementById('selectedCount').textContent = checkboxes.length;
+      }
+
+      function selectAllServers() {
+        const checkboxes = document.querySelectorAll('.server-checkbox');
+        checkboxes.forEach(cb => cb.checked = true);
+        updateSelectedCount();
+      }
+
+      function deselectAllServers() {
+        const checkboxes = document.querySelectorAll('.server-checkbox');
+        checkboxes.forEach(cb => cb.checked = false);
+        updateSelectedCount();
+      }
+
+      // Run healthcheck
+      async function runHealthcheck() {
+        try {
+          const checkboxes = document.querySelectorAll('.server-checkbox:checked');
+          
+          if (!checkboxes || checkboxes.length === 0) {
+            alert('Lütfen en az bir sunucu seçin!');
+            return;
+          }
+          
+          const serverIds = Array.from(checkboxes).map(cb => cb.value);
+          
+          console.log('[DEBUG] Selected server IDs:', serverIds);
+          
+          if (serverIds.length === 0) {
+            alert('Lütfen en az bir sunucu seçin!');
+            return;
+          }
+          
+          // Show loading
+          document.getElementById('loadingOverlay').style.display = 'flex';
+          document.getElementById('runButton').disabled = true;
+          
+          try {
+            const response = await fetch('/api/healthcheck/run', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ server_ids: serverIds })
+            });
+            
+            console.log('[DEBUG] Response status:', response.status);
+            
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const data = await response.json();
+            
+            console.log('[DEBUG] Response data:', data);
+            
+            // Display results
+            displayResults(data);
+            
+            // Reload page to show updated history after user has time to review
+            // setTimeout(() => {
+            //   window.location.reload();
+            // }, 10000);
+            
+          } catch (error) {
+            console.error('[ERROR] Healthcheck fetch error:', error);
+            alert('Healthcheck sırasında hata oluştu: ' + error.message);
+          } finally {
+            document.getElementById('loadingOverlay').style.display = 'none';
+            document.getElementById('runButton').disabled = false;
+          }
+        } catch (error) {
+          console.error('[ERROR] runHealthcheck exception:', error);
+          alert('Healthcheck başlatılamadı: ' + error.message);
+          document.getElementById('loadingOverlay').style.display = 'none';
+          document.getElementById('runButton').disabled = false;
+        }
+      }
+
+      // Global variable to store detailed results
+      let detailedResults = [];
+
+      function displayResults(data) {
+        try {
+          console.log('[DEBUG] displayResults called with data:', data);
+          
+          // Güvenlik kontrolleri
+          if (!data) {
+            throw new Error('Veri alınamadı (data is null/undefined)');
+          }
+          
+          if (!data.results) {
+            throw new Error('Sonuç listesi bulunamadı (data.results is undefined)');
+          }
+          
+          if (!Array.isArray(data.results)) {
+            throw new Error('Sonuç listesi geçersiz format (data.results is not an array)');
+          }
+          
+          const container = document.getElementById('resultsContainer');
+          detailedResults = data.results;
+          
+          let html = '<div class="row mt-4"><div class="col-md-12"><div class="card">';
+          html += '<h3>✅ Healthcheck Sonuçları</h3>';
+          html += `<p class="text-muted mb-3">${data.results.length} sunucu kontrol edildi</p>`;
+        
+        data.results.forEach((result, index) => {
+          const statusClass = result.status === 'success' ? 'success' : 'error';
+          const statusBadge = result.status === 'success' ? '✓ Başarılı' : '✗ Hata';
+          
+          html += `<div class="result-card ${statusClass}">`;
+          html += `<div class="result-header">`;
+          html += `<div><h4 style="margin: 0;">${result.hostname}</h4><span class="text-muted">${result.ip}</span></div>`;
+          html += `<div style="display: flex; gap: 0.5rem; align-items: center;">`;
+          html += `<span class="result-badge ${statusClass}">${statusBadge}</span>`;
+          if (result.status === 'success') {
+            html += `<button class="btn btn-primary btn-sm" onclick="showDetails(${index})">📋 Detay Gör</button>`;
+          }
+          html += `</div>`;
+          html += `</div>`;
+          
+          if (result.status === 'success') {
+            html += '<div class="result-details">';
+            
+            if (result.os_info) {
+              html += `<div class="detail-item"><div class="detail-label">İşletim Sistemi</div><div class="detail-value">${result.os_info}</div></div>`;
+            }
+            
+            if (result.cpu_info) {
+              html += `<div class="detail-item"><div class="detail-label">CPU</div><div class="detail-value">${result.cpu_info}</div></div>`;
+            }
+            
+            if (result.cpu_cores) {
+              html += `<div class="detail-item"><div class="detail-label">CPU Cores</div><div class="detail-value">${result.cpu_cores}</div></div>`;
+            }
+            
+            if (result.ram_total) {
+              html += `<div class="detail-item"><div class="detail-label">RAM</div><div class="detail-value">${result.ram_total}</div></div>`;
+            }
+            
+            if (result.uptime) {
+              html += `<div class="detail-item"><div class="detail-label">Uptime</div><div class="detail-value">${result.uptime}</div></div>`;
+            }
+            
+            if (result.postgresql_status) {
+              const pgBadge = result.postgresql_status === 'Var' ? 'success' : 'secondary';
+              const pgDetailsNA = result.postgresql_status === 'Var' && 
+                                  (result.pg_connection_count === 'N/A' || !result.pg_connection_count) && 
+                                  (result.pg_databases === 'N/A' || !result.pg_databases);
+              const warningIcon = pgDetailsNA ? ' <span title="Detaylı bilgiler alınamadı. Sudo yetkisi gerekiyor." style="cursor: help;">⚠️</span>' : '';
+              html += `<div class="detail-item"><div class="detail-label">PostgreSQL</div><div class="detail-value"><span class="badge bg-${pgBadge}">${result.postgresql_status}</span> ${result.postgresql_version || ''}${warningIcon}</div></div>`;
+            }
+            
+            if (result.load_average) {
+              html += `<div class="detail-item"><div class="detail-label">Load Average</div><div class="detail-value">${result.load_average}</div></div>`;
+            }
+            
+            html += '</div>';
+          } else {
+            html += `<div class="alert alert-danger mt-2" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);">`;
+            html += `<strong>Hata:</strong> ${result.error_message || 'Bilinmeyen hata'}`;
+            html += `</div>`;
+          }
+          
+          html += '</div>';
+        });
+        
+          html += '</div></div></div>';
+          container.innerHTML = html;
+          
+          // Scroll to results
+          container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          
+        } catch (error) {
+          console.error('[ERROR] displayResults exception:', error);
+          alert('Sonuçlar gösterilirken hata oluştu: ' + error.message + '\\n\\nDetay için F12 > Console');
+        }
+      }
+
+      function showDetails(index) {
+        try {
+          const result = detailedResults[index];
+          
+          // Güvenlik kontrolü
+          if (!result) {
+            alert('Sonuç bulunamadı!');
+            return;
+          }
+          
+          const modalBody = document.getElementById('detailModalBody');
+          const modalTitle = document.getElementById('detailModalTitle');
+          
+          modalTitle.textContent = `${result.hostname || 'Bilinmeyen Sunucu'} - Detaylı Bilgiler`;
+          
+          let html = '';
+          
+          console.log('[DEBUG] showDetails called for:', result.hostname, 'Result object:', result);
+        
+        // Sistem Bilgileri
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">🖥️ Sistem Bilgileri</h5>';
+        html += '<div class="detail-grid">';
+        html += `<div class="detail-row"><span class="detail-label">İşletim Sistemi:</span><span class="detail-value">${result.os_info || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Kernel Versiyon:</span><span class="detail-value">${result.kernel_version || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Mimari:</span><span class="detail-value">${result.architecture || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Hostname:</span><span class="detail-value">${result.hostname}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">IP Adresi:</span><span class="detail-value">${result.ip}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Uptime:</span><span class="detail-value">${result.uptime || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Son Başlatma:</span><span class="detail-value">${result.last_boot || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Timezone:</span><span class="detail-value">${result.timezone || 'N/A'}</span></div>`;
+        html += '</div>';
+        
+        // System Update Status - Güzel gösterim
+        if (result.system_update_status && result.system_update_status !== 'N/A') {
+          html += '<div style="margin-top: 1rem;">';
+          let updateBgColor, updateBorderColor, updateTextColor, updateIcon;
+          
+          if (result.system_update_status === 'up-to-date') {
+            updateBgColor = 'rgba(16, 185, 129, 0.1)';
+            updateBorderColor = 'rgba(16, 185, 129, 0.3)';
+            updateTextColor = '#10b981';
+            updateIcon = '✓';
+          } else if (result.system_update_status === 'updates-available') {
+            updateBgColor = 'rgba(245, 158, 11, 0.1)';
+            updateBorderColor = 'rgba(245, 158, 11, 0.3)';
+            updateTextColor = '#f59e0b';
+            updateIcon = '⚠️';
+          } else {
+            updateBgColor = 'rgba(107, 114, 128, 0.1)';
+            updateBorderColor = 'rgba(107, 114, 128, 0.3)';
+            updateTextColor = '#6b7280';
+            updateIcon = 'ℹ️';
+          }
+          
+          html += `<div style="background: ${updateBgColor}; border: 1px solid ${updateBorderColor}; border-radius: 0.5rem; padding: 0.75rem;">`;
+          html += `<div style="display: flex; align-items: center; gap: 0.5rem;">`;
+          html += `<span style="font-size: 1.2rem;">${updateIcon}</span>`;
+          html += `<div style="flex: 1;">`;
+          html += `<div style="font-weight: 600; color: ${updateTextColor}; font-size: 0.9rem;">Sistem Güncellemeleri</div>`;
+          html += `<div style="font-size: 0.85rem; color: var(--txt); margin-top: 0.25rem;">${result.system_update_message || 'Durum bilinmiyor'}</div>`;
+          html += `</div></div></div>`;
+          html += '</div>';
+        }
+        
+        html += '</div>';
+        
+        // CPU Bilgileri
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">⚙️ CPU Bilgileri</h5>';
+        html += '<div class="detail-grid">';
+        html += `<div class="detail-row"><span class="detail-label">CPU Model:</span><span class="detail-value">${result.cpu_info || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">CPU Cores:</span><span class="detail-value">${result.cpu_cores || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Load Average:</span><span class="detail-value">${result.load_average || 'N/A'}</span></div>`;
+        html += '</div>';
+        
+        // Top CPU Processes - Alt alta güzel gösterim
+        if (result.top_cpu_processes && result.top_cpu_processes !== 'N/A' && typeof result.top_cpu_processes === 'string') {
+          html += '<div style="margin-top: 1rem;">';
+          html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">📊 En Çok CPU Kullanan İşlemler</h6>';
+          const cpuProcesses = result.top_cpu_processes.split(' | ');
+          cpuProcesses.forEach((proc, idx) => {
+            const parts = proc.trim().split(/\s+/);
+            const percentage = parts[parts.length - 1];
+            const processName = parts.slice(0, -1).join(' ');
+            const percentNum = parseFloat(percentage);
+            const barColor = percentNum > 50 ? '#ef4444' : percentNum > 20 ? '#f59e0b' : '#10b981';
+            
+            html += `<div style="background: var(--hover); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 0.5rem; border-left: 3px solid ${barColor};">`;
+            html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">`;
+            html += `<span style="font-size: 0.85rem; font-family: monospace; color: var(--txt);">${processName}</span>`;
+            html += `<span style="font-weight: 600; color: ${barColor}; font-size: 0.9rem;">${percentage}</span>`;
+            html += `</div>`;
+            html += `<div style="background: var(--panel); height: 6px; border-radius: 3px; overflow: hidden;">`;
+            html += `<div style="background: ${barColor}; height: 100%; width: ${Math.min(percentNum * 2, 100)}%; transition: width 0.3s;"></div>`;
+            html += `</div></div>`;
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+        
+        // RAM Bilgileri
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">💾 RAM Bilgileri</h5>';
+        html += '<div class="detail-grid">';
+        html += `<div class="detail-row"><span class="detail-label">Total RAM:</span><span class="detail-value">${result.ram_total || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Kullanılan:</span><span class="detail-value">${result.ram_used || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Boş:</span><span class="detail-value">${result.ram_free || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Detaylı:</span><span class="detail-value">${result.memory_detailed || 'N/A'}</span></div>`;
+        html += `<div class="detail-row" style="grid-column: 1 / -1;"><span class="detail-label">Swap Memory:</span><span class="detail-value">${result.swap_memory || 'N/A'}</span></div>`;
+        html += '</div>';
+        
+        // Top Memory Processes - Alt alta güzel gösterim
+        if (result.top_memory_processes && result.top_memory_processes !== 'N/A' && typeof result.top_memory_processes === 'string') {
+          html += '<div style="margin-top: 1rem;">';
+          html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">📊 En Çok RAM Kullanan İşlemler</h6>';
+          const memProcesses = result.top_memory_processes.split(' | ');
+          memProcesses.forEach((proc, idx) => {
+            const parts = proc.trim().split(/\s+/);
+            const percentage = parts[parts.length - 1];
+            const processName = parts.slice(0, -1).join(' ');
+            const percentNum = parseFloat(percentage);
+            const barColor = percentNum > 50 ? '#ef4444' : percentNum > 20 ? '#f59e0b' : '#10b981';
+            
+            html += `<div style="background: var(--hover); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 0.5rem; border-left: 3px solid ${barColor};">`;
+            html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">`;
+            html += `<span style="font-size: 0.85rem; font-family: monospace; color: var(--txt);">${processName}</span>`;
+            html += `<span style="font-weight: 600; color: ${barColor}; font-size: 0.9rem;">${percentage}</span>`;
+            html += `</div>`;
+            html += `<div style="background: var(--panel); height: 6px; border-radius: 3px; overflow: hidden;">`;
+            html += `<div style="background: ${barColor}; height: 100%; width: ${Math.min(percentNum * 2, 100)}%; transition: width 0.3s;"></div>`;
+            html += `</div></div>`;
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+        
+        // Disk Bilgileri
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">💿 Disk Bilgileri</h5>';
+        if (result.disks && result.disks !== '[]' && result.disks !== 'N/A') {
+          try {
+            const disks = typeof result.disks === 'string' ? JSON.parse(result.disks) : result.disks;
+            if (Array.isArray(disks) && disks.length > 0) {
+              html += '<div class="table-responsive"><table class="table table-sm table-hover" style="font-size: 0.85rem;"><thead><tr><th>Device</th><th>Size</th><th>Used</th><th>Avail</th><th>Use%</th><th>Mount</th></tr></thead><tbody>';
+              disks.forEach(disk => {
+                const percentNum = parseInt(disk.percent.replace('%', ''));
+                const percentColor = percentNum > 90 ? '#ef4444' : percentNum > 75 ? '#f59e0b' : '#10b981';
+                html += `<tr><td>${disk.device}</td><td>${disk.size}</td><td>${disk.used}</td><td>${disk.avail}</td><td><span style="color: ${percentColor}; font-weight: 600;">${disk.percent}</span></td><td>${disk.mount}</td></tr>`;
+              });
+              html += '</tbody></table></div>';
+            } else {
+              html += '<p class="text-muted">Disk bilgisi bulunamadı</p>';
+            }
+          } catch (e) {
+            console.error('Disk parsing error:', e);
+            html += '<p class="text-muted">Disk bilgisi görüntülenemiyor</p>';
+          }
+        } else {
+          html += '<p class="text-muted">Disk bilgisi bulunamadı</p>';
+        }
+        if (result.disk_io_stats && result.disk_io_stats !== 'N/A') {
+          html += `<div class="mt-2"><strong>I/O İstatistikleri:</strong><pre style="font-size: 0.75rem; background: var(--hover); padding: 0.5rem; border-radius: 0.25rem;">${result.disk_io_stats}</pre></div>`;
+        }
+        
+        // Disk Performance Test - Her zaman göster
+        html += '<div style="margin-top: 1rem;">';
+        html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">⚡ Disk Performans Testi</h6>';
+        
+        // Eğer veri varsa göster
+        if (result.disk_type && result.disk_type !== 'N/A' && result.disk_type !== undefined) {
+          // Disk Type Badge
+          const diskTypeColor = result.disk_type === 'SSD' ? '#10b981' : '#f59e0b';
+          const diskTypeIcon = result.disk_type === 'SSD' ? '⚡' : '💿';
+          html += `<div style="background: var(--hover); border-radius: 0.5rem; padding: 1rem; border-left: 3px solid ${diskTypeColor};">`;
+          html += `<div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">`;
+          html += `<span style="font-size: 1.5rem;">${diskTypeIcon}</span>`;
+          html += `<div>`;
+          html += `<div style="font-weight: 600; color: ${diskTypeColor}; font-size: 1.1rem;">Disk Tipi: ${result.disk_type}</div>`;
+          html += `<div style="font-size: 0.75rem; color: var(--muted);">Ana sistem diski</div>`;
+          html += `</div></div>`;
+          
+          // Write Speed
+          html += `<div style="margin-bottom: 0.75rem;">`;
+          html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">`;
+          html += `<span style="font-size: 0.85rem; color: var(--txt);">📝 Yazma Hızı</span>`;
+          html += `<span style="font-weight: 600; color: #3b82f6; font-size: 0.95rem;">${result.disk_write_speed || 'N/A'}</span>`;
+          html += `</div>`;
+          html += `<div style="background: var(--panel); height: 8px; border-radius: 4px; overflow: hidden;">`;
+          html += `<div style="background: linear-gradient(90deg, #3b82f6, #06b6d4); height: 100%; width: 70%; animation: slideIn 0.5s ease-out;"></div>`;
+          html += `</div></div>`;
+          
+          // Read Speed
+          html += `<div>`;
+          html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">`;
+          html += `<span style="font-size: 0.85rem; color: var(--txt);">📖 Okuma Hızı</span>`;
+          html += `<span style="font-weight: 600; color: #10b981; font-size: 0.95rem;">${result.disk_read_speed || 'N/A'}</span>`;
+          html += `</div>`;
+          html += `<div style="background: var(--panel); height: 8px; border-radius: 4px; overflow: hidden;">`;
+          html += `<div style="background: linear-gradient(90deg, #10b981, #059669); height: 100%; width: 80%; animation: slideIn 0.5s ease-out;"></div>`;
+          html += `</div></div>`;
+          
+          html += '</div>';
+        } else {
+          // Veri yoksa bilgi mesajı göster
+          html += '<div style="background: rgba(107, 114, 128, 0.1); border: 1px solid rgba(107, 114, 128, 0.2); border-radius: 0.5rem; padding: 0.75rem; font-size: 0.85rem; color: var(--muted);">';
+          html += 'ℹ️ Disk performans testi bu kayıtta yapılmamış. Yeni bir healthcheck çalıştırarak disk performansını görebilirsiniz.';
+          html += '</div>';
+        }
+        html += '</div>';
+        
+        html += '</div>';
+        
+        // Network Bilgileri
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">🌐 Network Bilgileri</h5>';
+        html += '<div class="detail-grid">';
+        html += `<div class="detail-row"><span class="detail-label">IP Adresleri:</span><span class="detail-value">${result.network_info || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">DNS Servers:</span><span class="detail-value">${result.dns_servers || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Toplam Bağlantı:</span><span class="detail-value">${result.total_connections || 'N/A'}</span></div>`;
+        html += '</div>';
+        
+        // Network Interfaces - daha güzel gösterim
+        if (result.network_interfaces && result.network_interfaces !== 'N/A' && typeof result.network_interfaces === 'string') {
+          html += '<div style="margin-top: 1rem;">';
+          html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">🔌 Network Interfaces</h6>';
+          const interfaces = result.network_interfaces.split('\\n');
+          interfaces.forEach(iface => {
+            if (iface && iface.trim()) {
+              html += `<div style="background: var(--hover); padding: 0.5rem 0.75rem; border-radius: 0.5rem; margin-bottom: 0.5rem; font-family: monospace; font-size: 0.85rem; border-left: 3px solid #3b82f6;">${iface.trim()}</div>`;
+            }
+          });
+          html += '</div>';
+        }
+        
+        // Listening Ports - badge formatında
+        if (result.listening_ports && result.listening_ports !== 'N/A' && typeof result.listening_ports === 'string') {
+          html += '<div style="margin-top: 1rem;">';
+          html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">🔓 Dinlenen Portlar</h6>';
+          html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+          const ports = result.listening_ports.split(',').map(p => p.trim());
+          ports.forEach(port => {
+            if (port && port.length > 0) {
+              const portNum = parseInt(port);
+              let portColor = '#3b82f6';
+              let portLabel = '';
+              // Yaygın portları renklendir
+              if (portNum === 22) { portColor = '#10b981'; portLabel = ' SSH'; }
+              else if (portNum === 80) { portColor = '#f59e0b'; portLabel = ' HTTP'; }
+              else if (portNum === 443) { portColor = '#f59e0b'; portLabel = ' HTTPS'; }
+              else if (portNum === 5432) { portColor = '#3b82f6'; portLabel = ' PostgreSQL'; }
+              else if (portNum === 3306) { portColor = '#ef4444'; portLabel = ' MySQL'; }
+              
+              html += `<span style="background: ${portColor}; color: white; padding: 0.25rem 0.75rem; border-radius: 0.5rem; font-size: 0.85rem; font-weight: 500;">${port}${portLabel}</span>`;
+            }
+          });
+          html += '</div></div>';
+        }
+        
+        html += '</div>';
+        
+        // Servisler
+        html += '<div class="detail-section">';
+        html += '<h5 class="detail-section-title">⚡ Sistem Servisleri</h5>';
+        
+        // Running Services - badge formatında
+        if (result.running_services && result.running_services !== 'N/A' && typeof result.running_services === 'string') {
+          html += '<div style="margin-bottom: 1.5rem;">';
+          html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">✅ Çalışan Servisler</h6>';
+          html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+          const services = result.running_services.split(',').map(s => s.trim());
+          services.forEach(service => {
+            if (service && service.length > 0) {
+              html += `<span style="background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); padding: 0.25rem 0.75rem; border-radius: 0.5rem; font-size: 0.85rem; font-weight: 500; font-family: monospace;">${service}</span>`;
+            }
+          });
+          html += '</div></div>';
+        }
+        
+        // Failed Services - Detaylı gösterim
+        html += '<div>';
+        html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">❌ Hatalı Servisler</h6>';
+        if (result.failed_services === 'None' || !result.failed_services || result.failed_services === 'N/A') {
+          html += '<div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 0.5rem; padding: 0.75rem; color: #10b981; font-weight: 500;">';
+          html += '✓ Hiçbir servis hatası yok';
+          html += '</div>';
+        } else if (typeof result.failed_services === 'string') {
+          // Failed services'ı |||  ile ayırdık (yeni format), eski format virgülle ayrılmış olabilir
+          const separator = result.failed_services.includes('|||') ? '|||' : ',';
+          const failedServices = result.failed_services.split(separator).map(s => s.trim());
+          
+          failedServices.forEach(service => {
+            if (service && service !== '....' && service.length > 0) {
+              // Servis adı ve detayı ayır (parantez içindeki)
+              const match = service.match(/^([^\(]+)(\((.+)\))?$/);
+              const serviceName = match ? match[1].trim() : service;
+              const serviceDetail = match && match[3] ? match[3].trim() : '';
+              
+              html += '<div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-left: 4px solid #ef4444; border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem;">';
+              html += '<div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.25rem;">';
+              html += `<div style="flex: 1;"><span style="font-weight: 600; color: #ef4444; font-family: monospace; font-size: 0.95rem;">${serviceName}</span>`;
+              if (serviceDetail) {
+                html += `<div style="font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; line-height: 1.4; font-family: monospace;">${serviceDetail}</div>`;
+              }
+              html += '</div>';
+              html += '<span style="background: rgba(239, 68, 68, 0.2); color: #ef4444; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">FAILED</span>';
+              html += '</div>';
+              html += '</div>';
+            }
+          });
+        }
+        html += '</div>';
+        
+        html += '</div>';
+        
+        // Kernel Parameters (PostgreSQL için önemli)
+        if (result.kernel_params && result.kernel_params !== '{}' && result.kernel_params !== 'N/A') {
+          html += '<div class="detail-section">';
+          html += '<h5 class="detail-section-title">⚙️ Kernel Parametreleri (PostgreSQL için Kritik)</h5>';
+          
+          try {
+            const kernelParams = typeof result.kernel_params === 'string' ? JSON.parse(result.kernel_params) : result.kernel_params;
+            
+            // Shared Memory Section
+            html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem; margin-top: 1rem;">💾 Paylaşımlı Bellek (Shared Memory)</h6>';
+            html += '<div class="detail-grid">';
+            html += `<div class="detail-row"><span class="detail-label">SHMMAX:</span><span class="detail-value">${kernelParams.shmmax || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">SHMALL:</span><span class="detail-value">${kernelParams.shmall || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">SHMMNI:</span><span class="detail-value">${kernelParams.shmmni || 'N/A'}</span></div>`;
+            html += '</div>';
+            
+            // Semaphore Section
+            html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem; margin-top: 1rem;">🔗 Semaphore Parametreleri</h6>';
+            html += '<div class="detail-grid">';
+            if (kernelParams.semmsl) {
+              html += `<div class="detail-row"><span class="detail-label">SEMMSL:</span><span class="detail-value">${kernelParams.semmsl}</span></div>`;
+            }
+            if (kernelParams.semmns) {
+              html += `<div class="detail-row"><span class="detail-label">SEMMNS:</span><span class="detail-value">${kernelParams.semmns}</span></div>`;
+            }
+            if (kernelParams.semopm) {
+              html += `<div class="detail-row"><span class="detail-label">SEMOPM:</span><span class="detail-value">${kernelParams.semopm}</span></div>`;
+            }
+            if (kernelParams.semmni) {
+              html += `<div class="detail-row"><span class="detail-label">SEMMNI:</span><span class="detail-value">${kernelParams.semmni}</span></div>`;
+            }
+            if (kernelParams.sem) {
+              html += `<div class="detail-row" style="grid-column: 1 / -1;"><span class="detail-label">SEM:</span><span class="detail-value">${kernelParams.sem}</span></div>`;
+            }
+            html += '</div>';
+            
+            // VM/Memory Tuning Section
+            html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem; margin-top: 1rem;">📊 VM ve Bellek Ayarları</h6>';
+            html += '<div class="detail-grid">';
+            
+            // Swappiness with color coding
+            if (kernelParams.vmswappiness) {
+              let swapColor = 'var(--txt)';
+              if (kernelParams.vmswappiness.includes('Yüksek')) swapColor = '#ef4444';
+              else if (kernelParams.vmswappiness.includes('Düşük')) swapColor = '#10b981';
+              html += `<div class="detail-row"><span class="detail-label">VM Swappiness:</span><span class="detail-value" style="color: ${swapColor}; font-weight: 600;">${kernelParams.vmswappiness}</span></div>`;
+            }
+            
+            // THP with color coding
+            if (kernelParams.transparent_hugepage) {
+              let thpColor = 'var(--txt)';
+              if (kernelParams.transparent_hugepage.includes('never')) thpColor = '#10b981';
+              else if (kernelParams.transparent_hugepage.includes('always')) thpColor = '#ef4444';
+              else if (kernelParams.transparent_hugepage.includes('madvise')) thpColor = '#f59e0b';
+              html += `<div class="detail-row"><span class="detail-label">Transparent Huge Pages:</span><span class="detail-value" style="color: ${thpColor}; font-weight: 600;">${kernelParams.transparent_hugepage}</span></div>`;
+            }
+            
+            html += `<div class="detail-row"><span class="detail-label">Dirty Background Ratio:</span><span class="detail-value">${kernelParams.vmdirty_background_ratio || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Dirty Ratio:</span><span class="detail-value">${kernelParams.vmdirty_ratio || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Dirty Background Bytes:</span><span class="detail-value">${kernelParams.vmdirty_background_bytes || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Dirty Bytes:</span><span class="detail-value">${kernelParams.vmdirty_bytes || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Overcommit Memory:</span><span class="detail-value">${kernelParams.vm_overcommit_memory || 'N/A'}</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Overcommit Ratio:</span><span class="detail-value">${kernelParams.vm_overcommit_ratio || 'N/A'}</span></div>`;
+            html += '</div>';
+            
+            // CPU/Scheduler Section
+            html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem; margin-top: 1rem;">⚡ CPU ve Scheduler</h6>';
+            html += '<div class="detail-grid">';
+            html += `<div class="detail-row"><span class="detail-label">Scheduler Autogroup:</span><span class="detail-value">${kernelParams.kernelsched_autogroup_enabled || 'N/A'}</span></div>`;
+            html += `<div class="detail-row" style="grid-column: 1 / -1;"><span class="detail-label">CPU Scaling Governor:</span><span class="detail-value">${kernelParams.scaling_governor || 'N/A'}</span></div>`;
+            html += '</div>';
+            
+            html += '</div>';
+          } catch (e) {
+            console.error('Kernel params parsing error:', e);
+            html += '<p class="text-muted">Kernel parametreleri görüntülenemiyor</p></div>';
+          }
+        }
+        
+        // PostgreSQL Bilgileri
+        if (result.postgresql_status === 'Var') {
+          html += '<div class="detail-section">';
+          html += '<h5 class="detail-section-title">🐘 PostgreSQL Bilgileri</h5>';
+          
+          // Check if most PostgreSQL details are N/A (indicating permission issues)
+          const pgDetailsNA = (result.pg_connection_count === 'N/A' || !result.pg_connection_count) && 
+                              (result.pg_databases === 'N/A' || !result.pg_databases) && 
+                              (result.pg_data_directory === 'N/A' || !result.pg_data_directory);
+          
+          if (pgDetailsNA) {
+            html += '<div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem;">';
+            html += '<div style="display: flex; align-items: start; gap: 0.75rem;">';
+            html += '<span style="font-size: 1.5rem;">ℹ️</span>';
+            html += '<div>';
+            html += '<strong style="color: #3b82f6; font-size: 1rem;">PostgreSQL Detaylı Bilgileri Kısmi Olarak Alındı</strong>';
+            html += '<p style="margin: 0.5rem 0 0 0; font-size: 0.9rem; line-height: 1.5; color: var(--txt);">';
+            html += 'Sistem <strong>SSH şifrenizi kullanarak sudo</strong> ile bazı bilgileri almayı denedi ancak tüm bilgiler alınamadı. ';
+            html += '<strong>Daha detaylı bilgi için</strong> aşağıdaki çözümlerden birini uygulayabilirsiniz:<br><br>';
+            html += '<strong>Çözüm 1 - SSH Kullanıcısına Sudo Yetkisi Ver (Önerilen):</strong><br>';
+            html += '<code style="display: block; background: var(--hover); padding: 0.75rem; border-radius: 0.25rem; margin-top: 0.5rem; font-size: 0.85rem; overflow-x: auto;">';
+            html += '# /etc/sudoers dosyasına ekleyin (visudo komutu ile):<br>';
+            html += 'your-ssh-user ALL=(postgres) NOPASSWD: /usr/bin/psql<br><br>';
+            html += '# Şifresiz sudo yetkisini test edin:<br>';
+            html += 'sudo -n -u postgres psql -c "SELECT version();"';
+            html += '</code>';
+            html += '<span style="font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; display: block;"><strong>Not:</strong> <code>your-ssh-user</code> yerine SSH kullanıcınızı yazın (örnek: frk). NOPASSWD eklerseniz her seferinde şifre girmeden çalışır.</span><br>';
+            html += '<strong>Çözüm 2 - SSH Kullanıcısı Sudo Grubuna Eklensin:</strong><br>';
+            html += '<code style="display: block; background: var(--hover); padding: 0.75rem; border-radius: 0.25rem; margin-top: 0.5rem; font-size: 0.85rem; overflow-x: auto;">';
+            html += 'usermod -aG sudo your-ssh-user';
+            html += '</code>';
+            html += '<span style="font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; display: block;">Bu durumda sistem SSH şifrenizi sudo şifresi olarak kullanacak.</span>';
+            html += '</p>';
+            html += '</div></div></div>';
+          }
+          
+          html += '<div class="detail-grid">';
+          html += `<div class="detail-row"><span class="detail-label">Durum:</span><span class="detail-value"><span class="badge bg-success">Var</span></span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Versiyon:</span><span class="detail-value">${result.postgresql_version || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Port:</span><span class="detail-value">${result.pg_port || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Data Directory:</span><span class="detail-value">${result.pg_data_directory || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Aktif Bağlantı:</span><span class="detail-value">${result.pg_connection_count || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Max Bağlantı:</span><span class="detail-value">${result.pg_max_connections || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Toplam Boyut:</span><span class="detail-value">${result.pg_total_size || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">PostgreSQL Uptime:</span><span class="detail-value">${result.pg_uptime || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Replication:</span><span class="detail-value">${result.postgresql_replication || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">pgBackRest:</span><span class="detail-value">${result.pgbackrest_status || 'N/A'}</span></div>`;
+          html += '</div>';
+          
+          // Databases - boyutlarıyla birlikte güzel gösterim
+          if (result.pg_databases && result.pg_databases !== 'N/A' && typeof result.pg_databases === 'string') {
+            html += '<div style="margin-top: 1rem;">';
+            html += '<h6 style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">🗄️ Veritabanları</h6>';
+            
+            // Eğer boyut bilgisi varsa (parantez içinde)
+            if (typeof result.pg_databases === 'string' && result.pg_databases.includes('(') && result.pg_databases.includes(')')) {
+              // Database ismi (boyut) formatında
+              const databases = result.pg_databases.split(',').map(db => db.trim());
+              databases.forEach(db => {
+                if (db && db !== 'database' && !db.includes('alınamadı')) {
+                  // Database ismi ve boyutunu ayır
+                  const match = db.match(/^(.+?)\s*\((.+?)\)$/);
+                  if (match) {
+                    const dbName = match[1].trim();
+                    const dbSize = match[2].trim();
+                    
+                    html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem; border-left: 3px solid #3b82f6;">';
+                    html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+                    html += `<span style="font-weight: 600; color: var(--txt); font-family: monospace; font-size: 0.9rem;">${dbName}</span>`;
+                    html += `<span style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; padding: 0.25rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 500;">${dbSize}</span>`;
+                    html += '</div></div>';
+                  } else {
+                    // Normal badge formatı
+                    html += `<span style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); padding: 0.35rem 0.85rem; border-radius: 0.5rem; font-size: 0.9rem; font-weight: 500; font-family: monospace;">${db}</span>`;
+                  }
+                }
+              });
+            } else {
+              // Eski format - sadece isimler (badge formatı)
+              html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+              const databases = result.pg_databases.split(',').map(db => db.trim());
+              databases.forEach(db => {
+                if (db && !db.includes('alınamadı')) {
+                  html += `<span style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); padding: 0.35rem 0.85rem; border-radius: 0.5rem; font-size: 0.9rem; font-weight: 500; font-family: monospace;">${db}</span>`;
+                }
+              });
+              html += '</div>';
+            }
+            html += '</div>';
+          }
+          
+          // PostgreSQL Ayarları
+          html += '<h6 class="mt-3" style="color: var(--txt); font-size: 0.95rem;">📊 PostgreSQL Ayarları</h6>';
+          html += '<div class="detail-grid">';
+          html += `<div class="detail-row"><span class="detail-label">Shared Buffers:</span><span class="detail-value">${result.pg_shared_buffers || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Work Mem:</span><span class="detail-value">${result.pg_work_mem || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Effective Cache Size:</span><span class="detail-value">${result.pg_effective_cache_size || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Maintenance Work Mem:</span><span class="detail-value">${result.pg_maintenance_work_mem || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">WAL Level:</span><span class="detail-value">${result.pg_wal_level || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Archive Mode:</span><span class="detail-value">${result.pg_archive_mode || 'N/A'}</span></div>`;
+          html += `<div class="detail-row" style="grid-column: 1 / -1;"><span class="detail-label">Replication Slots:</span><span class="detail-value" style="font-size: 0.85rem;">${result.pg_replication_slots || 'N/A'}</span></div>`;
+          html += '</div>';
+          
+          // PostgreSQL Backup Araçları
+          html += '<h6 class="mt-4" style="color: var(--txt); font-size: 0.95rem; margin-bottom: 0.75rem;">💾 PostgreSQL Backup Araçları</h6>';
+          
+          // pgBackRest
+          html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem; border-left: 3px solid #3b82f6;">';
+          html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+          html += '<span style="font-weight: 600; font-size: 0.9rem;">🔵 pgBackRest</span>';
+          const pgbackrestBadge = result.pgbackrest_status === 'Var' ? 
+            '<span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>' :
+            '<span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">YOK</span>';
+          html += pgbackrestBadge;
+          html += '</div>';
+          if (result.pgbackrest_details && result.pgbackrest_details !== 'Yok' && result.pgbackrest_details !== 'N/A' && typeof result.pgbackrest_details === 'string') {
+            html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border);">`;
+            
+            // Satır satır parse edelim ve güzel gösterelim
+            const lines = result.pgbackrest_details.split('\n');
+            lines.forEach(line => {
+              if (line.trim()) {
+                let lineColor = 'var(--txt)';
+                let lineWeight = 'normal';
+                let leftBorder = '';
+                
+                // Stanza satırı
+                if (line.includes('stanza:')) {
+                  lineWeight = '600';
+                  lineColor = '#3b82f6';
+                  leftBorder = 'border-left: 3px solid #3b82f6; padding-left: 0.5rem;';
+                }
+                // Status satırı
+                else if (line.includes('status:')) {
+                  if (line.includes('ok')) {
+                    lineColor = '#10b981';
+                  } else if (line.includes('error')) {
+                    lineColor = '#ef4444';
+                  }
+                }
+                // Error satırları
+                else if (line.includes('error') || line.includes('Error')) {
+                  lineColor = '#ef4444';
+                }
+                // Db satırı
+                else if (line.includes('db (')) {
+                  lineColor = '#f59e0b';
+                }
+                
+                html += `<div style="font-size: 0.8rem; color: ${lineColor}; font-family: monospace; line-height: 1.6; font-weight: ${lineWeight}; ${leftBorder}">${line}</div>`;
+              }
+            });
+            
+            html += '</div>';
+          }
+          html += '</div>';
+          
+          // pg_probackup
+          html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem; border-left: 3px solid #f59e0b;">';
+          html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+          html += '<span style="font-weight: 600; font-size: 0.9rem;">🟡 pg_probackup</span>';
+          const pgprobackupBadge = result.pg_probackup_status === 'Var' ?
+            '<span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>' :
+            '<span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">YOK</span>';
+          html += pgprobackupBadge;
+          html += '</div>';
+          if (result.pg_probackup_details && result.pg_probackup_details !== 'Yok' && result.pg_probackup_details !== 'N/A' && typeof result.pg_probackup_details === 'string') {
+            html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border);">`;
+            html += `<div style="font-size: 0.8rem; color: var(--txt); font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.pg_probackup_details}</div>`;
+            html += '</div>';
+          }
+          html += '</div>';
+          
+          // pgBarman
+          html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem; border-left: 3px solid #8b5cf6;">';
+          html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+          html += '<span style="font-weight: 600; font-size: 0.9rem;">🟣 pgBarman</span>';
+          const pgbarmanBadge = result.pgbarman_status === 'Var' ?
+            '<span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>' :
+            '<span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">YOK</span>';
+          html += pgbarmanBadge;
+          html += '</div>';
+          if (result.pgbarman_details && result.pgbarman_details !== 'Yok' && result.pgbarman_details !== 'N/A' && typeof result.pgbarman_details === 'string') {
+            html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border);">`;
+            html += `<div style="font-size: 0.8rem; color: var(--txt); font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.pgbarman_details}</div>`;
+            html += '</div>';
+          }
+          html += '</div>';
+          
+          html += '</div>';
+        }
+        
+        // High Availability Tools
+        const haToolsExist = (result.patroni_status && result.patroni_status !== 'Yok' && result.patroni_status !== 'N/A') ||
+                             (result.repmgr_status && result.repmgr_status !== 'Yok' && result.repmgr_status !== 'N/A') ||
+                             (result.paf_status && result.paf_status !== 'Yok' && result.paf_status !== 'N/A') ||
+                             (result.citus_status && result.citus_status !== 'Yok' && result.citus_status !== 'N/A') ||
+                             (result.streaming_replication_status && result.streaming_replication_status !== 'N/A' && result.streaming_replication_status !== 'Yok (Standalone)');
+        
+        if (haToolsExist) {
+          html += '<div class="detail-section">';
+          html += '<h5 class="detail-section-title">🔄 High Availability ve Replication</h5>';
+          
+          // Streaming Replication
+          if (result.streaming_replication_status && result.streaming_replication_status !== 'N/A' && result.streaming_replication_status !== 'Yok (Standalone)') {
+            const isMaster = result.streaming_replication_status.includes('Master');
+            const borderColor = isMaster ? '#10b981' : '#06b6d4';
+            const bgColor = isMaster ? 'rgba(16, 185, 129, 0.2)' : 'rgba(6, 182, 212, 0.2)';
+            const icon = isMaster ? '📤' : '📥';
+            
+            html += `<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.75rem; border-left: 3px solid ${borderColor};">`;
+            html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+            html += `<span style="font-weight: 600; font-size: 0.95rem;">${icon} Streaming Replication</span>`;
+            html += `<span style="background: ${bgColor}; color: ${borderColor}; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">${result.streaming_replication_status}</span>`;
+            html += '</div>';
+            if (result.streaming_replication_details && result.streaming_replication_details !== 'N/A') {
+              html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border); font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.streaming_replication_details}</div>`;
+            }
+            html += '</div>';
+          }
+          
+          // Patroni
+          if (result.patroni_status && result.patroni_status !== 'Yok') {
+            html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.75rem; border-left: 3px solid #10b981;">';
+            html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+            html += '<span style="font-weight: 600; font-size: 0.95rem;">🟢 Patroni (HA Cluster Manager)</span>';
+            html += '<span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>';
+            html += '</div>';
+            if (result.patroni_details && result.patroni_details !== 'N/A') {
+              html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border); font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.patroni_details}</div>`;
+            }
+            html += '</div>';
+          }
+          
+          // Repmgr
+          if (result.repmgr_status && result.repmgr_status !== 'Yok') {
+            html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.75rem; border-left: 3px solid #3b82f6;">';
+            html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+            html += '<span style="font-weight: 600; font-size: 0.95rem;">🔵 Repmgr (Replication Manager)</span>';
+            html += '<span style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>';
+            html += '</div>';
+            if (result.repmgr_details && result.repmgr_details !== 'N/A') {
+              html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border); font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.repmgr_details}</div>`;
+            }
+            html += '</div>';
+          }
+          
+          // PAF/Pacemaker
+          if (result.paf_status && result.paf_status !== 'Yok') {
+            html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.75rem; border-left: 3px solid #f59e0b;">';
+            html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+            html += '<span style="font-weight: 600; font-size: 0.95rem;">🟡 PAF / Pacemaker (Cluster Manager)</span>';
+            html += '<span style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">KURULU</span>';
+            html += '</div>';
+            if (result.paf_details && result.paf_details !== 'N/A') {
+              html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border); font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.paf_details}</div>`;
+            }
+            html += '</div>';
+          }
+          
+          // Citus
+          if (result.citus_status && result.citus_status !== 'Yok') {
+            html += '<div style="background: var(--hover); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.75rem; border-left: 3px solid #8b5cf6;">';
+            html += '<div style="display: flex; justify-content: space-between; align-items: center;">';
+            html += '<span style="font-weight: 600; font-size: 0.95rem;">🟣 Citus (Distributed PostgreSQL)</span>';
+            const citusStatusText = result.citus_status.includes('extension') ? 'EXTENSION AKTİF' : 'KURULU';
+            html += `<span style="background: rgba(139, 92, 246, 0.2); color: #8b5cf6; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 600;">${citusStatusText}</span>`;
+            html += '</div>';
+            if (result.citus_details && result.citus_details !== 'N/A') {
+              html += `<div style="margin-top: 0.5rem; background: var(--panel); padding: 0.75rem; border-radius: 0.25rem; border: 1px solid var(--border); font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.6;">${result.citus_details}</div>`;
+            }
+            html += '</div>';
+          }
+          
+          html += '</div>';
+        }
+        
+          modalBody.innerHTML = html;
+          
+          // Show modal
+          const modal = new bootstrap.Modal(document.getElementById('detailModal'));
+          modal.show();
+          
+        } catch (error) {
+          console.error('[ERROR] showDetails exception:', error);
+          alert('Detaylar gösterilirken hata oluştu: ' + error.message + '\\n\\nBrowser console\'una bakın (F12)');
+        }
+      }
+
       // Initialize theme on page load
       document.addEventListener('DOMContentLoaded', function() {
         initTheme();
@@ -4610,6 +6007,12 @@ TEMPLATE_HEALTHCHECK = r"""
         if (themeToggle) {
           themeToggle.addEventListener('click', toggleTheme);
         }
+        
+        // Add event listeners to checkboxes
+        const checkboxes = document.querySelectorAll('.server-checkbox');
+        checkboxes.forEach(cb => {
+          cb.addEventListener('change', updateSelectedCount);
+        });
       });
     </script>
     
@@ -5028,7 +6431,1702 @@ def healthcheck():
     # Healthcheck sayfası ziyaret edildiğini logla
     log_activity(session['user_id'], session['username'], 'healthcheck_access', 
                 'Healthcheck sayfasını ziyaret etti', 'healthcheck')
-    return render_template_string(TEMPLATE_HEALTHCHECK)
+    
+    # Sunucu listesini çek
+    servers = db_query("SELECT * FROM sunucu_envanteri ORDER BY hostname")
+    
+    # Son 50 healthcheck kaydını çek
+    history = db_query("""
+        SELECT * FROM healthcheck_results 
+        ORDER BY created_at DESC 
+        LIMIT 50
+    """)
+    
+    return render_template_string(TEMPLATE_HEALTHCHECK, servers=servers, history=history)
+
+# Healthcheck API - Run healthcheck on selected servers
+@app.route("/api/healthcheck/run", methods=["POST"])
+@require_auth("multiquery")
+def api_healthcheck_run():
+    try:
+        print("[DEBUG] ========== API HEALTHCHECK BAŞLADI ==========")
+        data = request.get_json()
+        print(f"[DEBUG] Request data: {data}")
+        server_ids = data.get('server_ids', [])
+        print(f"[DEBUG] Server IDs: {server_ids}")
+        
+        if not server_ids:
+            return jsonify({'success': False, 'message': 'Sunucu seçilmedi'}), 400
+        
+        results = []
+        
+        # Her sunucu için healthcheck çalıştır
+        for server_id in server_ids:
+            # Sunucu bilgilerini çek
+            server_data = db_query("SELECT * FROM sunucu_envanteri WHERE id = ?", (server_id,))
+            
+            if not server_data:
+                continue
+            
+            server = server_data[0]
+            result = {
+                'server_id': server_id,
+                'hostname': server['hostname'],
+                'ip': server['ip'],
+                'status': 'error',
+                'error_message': None
+            }
+            
+            ssh = None  # SSH bağlantısını başta None olarak tanımla
+            
+            try:
+                # SSH bağlantısı kur ve bilgileri topla
+                if not PARAMIKO_AVAILABLE:
+                    result['error_message'] = 'Paramiko kütüphanesi yüklü değil'
+                    results.append(result)
+                    continue
+                
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                # Şifreyi çöz
+                password = decrypt_password(server['ssh_password']) if server['ssh_password'] else None
+                
+                if not password:
+                    result['error_message'] = 'SSH şifresi bulunamadı'
+                    results.append(result)
+                    continue
+                
+                # Bağlan
+                ssh.connect(
+                    hostname=server['ip'],
+                    port=server['ssh_port'],
+                    username=server['ssh_user'],
+                    password=password,
+                    timeout=10
+                )
+                
+                # Sistem bilgilerini topla
+                result['status'] = 'success'
+                
+                # OS Info
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("cat /etc/os-release | grep PRETTY_NAME | cut -d'\"' -f2")
+                    result['os_info'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['os_info'] = 'N/A'
+                
+                # CPU Info
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d':' -f2 | xargs")
+                    result['cpu_info'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['cpu_info'] = 'N/A'
+                
+                # CPU Cores
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("nproc")
+                    cores = stdout.read().decode().strip()
+                    result['cpu_cores'] = f"{cores} cores" if cores else 'N/A'
+                except:
+                    result['cpu_cores'] = 'N/A'
+                
+                # RAM Info - Total
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("free -h | grep 'Mem:' | awk '{print $2}'")
+                    result['ram_total'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['ram_total'] = 'N/A'
+                
+                # RAM Info - Used
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("free -h | grep 'Mem:' | awk '{print $3}'")
+                    result['ram_used'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['ram_used'] = 'N/A'
+                
+                # RAM Info - Free
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("free -h | grep 'Mem:' | awk '{print $4}'")
+                    result['ram_free'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['ram_free'] = 'N/A'
+                
+                # Disk Info
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("df -h | grep -E '^/dev/' | awk '{print $1,$2,$3,$4,$5,$6}'")
+                    disk_output = stdout.read().decode().strip()
+                    if disk_output:
+                        import json
+                        disks = []
+                        for line in disk_output.split('\n'):
+                            parts = line.split()
+                            if len(parts) >= 6:
+                                disks.append({
+                                    'device': parts[0],
+                                    'size': parts[1],
+                                    'used': parts[2],
+                                    'avail': parts[3],
+                                    'percent': parts[4],
+                                    'mount': parts[5]
+                                })
+                        result['disks'] = json.dumps(disks)
+                    else:
+                        result['disks'] = '[]'
+                except:
+                    result['disks'] = '[]'
+                
+                # Uptime
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("uptime -p")
+                    result['uptime'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['uptime'] = 'N/A'
+                
+                # PostgreSQL Status
+                result['postgresql_status'] = 'Yok'
+                result['postgresql_version'] = None
+                result['postgresql_replication'] = 'N/A'
+                
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("systemctl is-active postgresql 2>/dev/null || systemctl is-active postgresql-* 2>/dev/null | head -1")
+                    pg_status = stdout.read().decode().strip()
+                    
+                    if not pg_status or pg_status == '':
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep postgres | grep -v grep | wc -l")
+                        process_count = stdout.read().decode().strip()
+                        if process_count and int(process_count) > 0:
+                            pg_status = 'active'
+                    
+                    if pg_status and ('active' in pg_status.lower() or 'running' in pg_status.lower() or pg_status == 'active'):
+                        result['postgresql_status'] = 'Var'
+                        
+                        # PostgreSQL Version - Multiple methods
+                        try:
+                            # Method 1: psql --version (doesn't require sudo)
+                            stdin, stdout, stderr = ssh.exec_command("psql --version 2>/dev/null")
+                            pg_version = stdout.read().decode().strip()
+                            if not pg_version or 'PostgreSQL' not in pg_version:
+                                # Method 2: pg_config (doesn't require sudo)
+                                stdin, stdout, stderr = ssh.exec_command("pg_config --version 2>/dev/null")
+                                pg_version = stdout.read().decode().strip()
+                            if not pg_version or 'PostgreSQL' not in pg_version:
+                                # Method 3: sudo -u postgres psql
+                                stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c 'SELECT version();' 2>/dev/null")
+                                pg_version = stdout.read().decode().strip()
+                            
+                            if pg_version and 'PostgreSQL' in pg_version:
+                                import re
+                                version_match = re.search(r'PostgreSQL (\d+\.?\d*)', pg_version)
+                                if version_match:
+                                    result['postgresql_version'] = f"PostgreSQL {version_match.group(1)}"
+                        except Exception as e:
+                            print(f"PG Version error: {e}")
+                            pass
+                        
+                        # Replication Status
+                        try:
+                            stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c 'SELECT client_addr FROM pg_stat_replication LIMIT 1;' 2>/dev/null")
+                            replication_info = stdout.read().decode().strip()
+                            result['postgresql_replication'] = 'Var' if replication_info else 'Yok'
+                        except:
+                            result['postgresql_replication'] = 'Yok'
+                except:
+                    pass
+                
+                # pgBackRest Status
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("which pgbackrest || find /usr -name pgbackrest 2>/dev/null | head -1")
+                    pgbackrest_info = stdout.read().decode().strip()
+                    result['pgbackrest_status'] = 'Var' if pgbackrest_info else 'Yok'
+                except:
+                    result['pgbackrest_status'] = 'Yok'
+                
+                # Network Info
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ip -4 addr show | grep inet | grep -v '127.0.0.1' | awk '{print $2}' | head -3")
+                    result['network_info'] = stdout.read().decode().strip().replace('\n', ', ') or 'N/A'
+                except:
+                    result['network_info'] = 'N/A'
+                
+                # Load Average
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("uptime | awk -F'load average:' '{print $2}' | xargs")
+                    result['load_average'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['load_average'] = 'N/A'
+                
+                # ============ EK DETAYLI BİLGİLER ============
+                
+                # Kernel Version
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("uname -r")
+                    result['kernel_version'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['kernel_version'] = 'N/A'
+                
+                # Architecture
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("uname -m")
+                    result['architecture'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['architecture'] = 'N/A'
+                
+                # Last Boot Time
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("who -b | awk '{print $3, $4}'")
+                    result['last_boot'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['last_boot'] = 'N/A'
+                
+                # Swap Memory
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("free -h | grep 'Swap:' | awk '{print \"Total: \" $2 \", Used: \" $3 \", Free: \" $4}'")
+                    result['swap_memory'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['swap_memory'] = 'N/A'
+                
+                # Memory Detailed Info
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("free -h | grep 'Mem:' | awk '{print \"Available: \" $7 \", Buffers: \" $6}'")
+                    result['memory_detailed'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['memory_detailed'] = 'N/A'
+                
+                # Top 5 CPU Processes
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ps aux --sort=-%cpu | head -6 | tail -5 | awk '{print $11, $3\"%\"}'")
+                    top_cpu = stdout.read().decode().strip()
+                    result['top_cpu_processes'] = top_cpu.replace('\n', ' | ') if top_cpu else 'N/A'
+                except:
+                    result['top_cpu_processes'] = 'N/A'
+                
+                # Top 5 Memory Processes
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ps aux --sort=-%mem | head -6 | tail -5 | awk '{print $11, $4\"%\"}'")
+                    top_mem = stdout.read().decode().strip()
+                    result['top_memory_processes'] = top_mem.replace('\n', ' | ') if top_mem else 'N/A'
+                except:
+                    result['top_memory_processes'] = 'N/A'
+                
+                # Disk I/O Statistics
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("iostat -d -k 1 2 | tail -n +4 | grep -E '^(sd|nvme|vd)' | head -5")
+                    result['disk_io_stats'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['disk_io_stats'] = 'N/A'
+                
+                # Disk Performance Test - Basit test (sudo_exec olmadan - daha sonra yapacağız)
+                # Bu bölümde sadece placeholder koyuyoruz, asıl test PostgreSQL bölümünden sonra yapılacak
+                result['disk_type'] = 'PENDING'
+                result['disk_write_speed'] = 'PENDING'
+                result['disk_read_speed'] = 'PENDING'
+                result['disk_performance_test'] = 'PENDING'
+                
+                # Network Interfaces
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ip -br addr show | grep -v 'lo'")
+                    result['network_interfaces'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['network_interfaces'] = 'N/A'
+                
+                # DNS Servers
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("cat /etc/resolv.conf | grep nameserver | awk '{print $2}'")
+                    dns = stdout.read().decode().strip()
+                    result['dns_servers'] = dns.replace('\n', ', ') if dns else 'N/A'
+                except:
+                    result['dns_servers'] = 'N/A'
+                
+                # Timezone
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("timedatectl | grep 'Time zone' | awk '{print $3}'")
+                    result['timezone'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['timezone'] = 'N/A'
+                
+                # System Services (important ones)
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("systemctl list-units --type=service --state=running | grep -E 'ssh|cron|rsyslog|network' | awk '{print $1}' | head -10")
+                    services = stdout.read().decode().strip()
+                    result['running_services'] = services.replace('\n', ', ') if services else 'N/A'
+                except:
+                    result['running_services'] = 'N/A'
+                
+                # Failed Services - Daha detaylı ve güvenilir parsing
+                try:
+                    # systemctl'den sadece servis isimlerini al (bullet point'leri atla)
+                    stdin, stdout, stderr = ssh.exec_command(r"systemctl list-units --type=service --state=failed --no-pager --plain --no-legend 2>/dev/null | awk '{print $1}' | grep -E '\.service$' | head -10")
+                    failed = stdout.read().decode().strip()
+                    
+                    print(f"[DEBUG] Failed services raw output: '{failed}'")
+                    
+                    if failed:
+                        failed_list = []
+                        for service_name in failed.split('\n'):
+                            service_name = service_name.strip()
+                            # Sadece ● veya boş değilse işle
+                            if service_name and service_name != '●' and '.service' in service_name:
+                                print(f"[DEBUG] Processing failed service: {service_name}")
+                                
+                                # Her servis için detaylı bilgi al
+                                stdin, stdout, stderr = ssh.exec_command(f"systemctl status {service_name} --no-pager --lines=0 2>/dev/null | grep 'Active:' | cut -d':' -f2-")
+                                detail = stdout.read().decode().strip()
+                                
+                                # Servis adı ve kısa açıklama
+                                service_info = f"{service_name}"
+                                if detail and detail != service_name:
+                                    # Active satırından durumu al
+                                    service_info += f" ({detail[:150]})"
+                                
+                                failed_list.append(service_info)
+                                print(f"[DEBUG] Added failed service: {service_info}")
+                        
+                        result['failed_services'] = ' ||| '.join(failed_list) if failed_list else 'None'
+                        print(f"[DEBUG] Final failed_services: {result['failed_services']}")
+                    else:
+                        result['failed_services'] = 'None'
+                        print(f"[DEBUG] No failed services found")
+                except Exception as e:
+                    print(f"[DEBUG] Failed services exception: {e}")
+                    result['failed_services'] = 'N/A'
+                
+                # System Update Status - Hızlı güncelleme kontrolü (repo update YAPMADAN)
+                try:
+                    # Basit ve hızlı kontrol - sadece mevcut cache'e bakar
+                    update_check_script = """
+if command -v apt-get &>/dev/null; then
+    # Debian: Sadece mevcut cache'teki güncellemeleri kontrol et (repo update YOK)
+    UPDATES=$(apt list --upgradable 2>/dev/null | grep -c upgradable)
+    if [ "$UPDATES" -gt 1 ]; then
+        echo "STATUS:WARNING|$((UPDATES-1)) paket güncellemesi bekliyor"
+    else
+        echo "STATUS:OK|Sistem güncel görünüyor"
+    fi
+elif command -v yum &>/dev/null; then
+    # Red Hat: needs-restarting sadece reboot gerekip gerekmediğini kontrol eder (hızlı)
+    if command -v needs-restarting &>/dev/null; then
+        needs-restarting -r &>/dev/null
+        if [ $? -eq 1 ]; then
+            echo "STATUS:WARNING|Sistem yeniden başlatma gerektirebilir"
+        else
+            echo "STATUS:OK|Sistem güncel görünüyor"
+        fi
+    else
+        echo "STATUS:INFO|Güncelleme durumu kontrol edilemiyor"
+    fi
+else
+    echo "STATUS:INFO|Desteklenmeyen sistem"
+fi
+"""
+                    stdin, stdout, stderr = ssh.exec_command(update_check_script)
+                    update_output = stdout.read().decode().strip()
+                    
+                    # Output'u parse et
+                    if 'STATUS:OK' in update_output:
+                        result['system_update_status'] = 'up-to-date'
+                        result['system_update_message'] = update_output.split('STATUS:OK|')[1] if '|' in update_output else 'Sistem güncel'
+                    elif 'STATUS:WARNING' in update_output:
+                        result['system_update_status'] = 'updates-available'
+                        result['system_update_message'] = update_output.split('STATUS:WARNING|')[1] if '|' in update_output else 'Güncellemeler mevcut'
+                    else:
+                        result['system_update_status'] = 'info'
+                        result['system_update_message'] = update_output.split('STATUS:INFO|')[1] if 'STATUS:INFO' in update_output else 'Durum bilinmiyor'
+                except:
+                    result['system_update_status'] = 'N/A'
+                    result['system_update_message'] = 'Kontrol yapılamadı'
+                
+                # Open Ports
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ss -tuln | grep LISTEN | awk '{print $5}' | cut -d':' -f2 | sort -n | uniq | head -20")
+                    ports = stdout.read().decode().strip()
+                    result['listening_ports'] = ports.replace('\n', ', ') if ports else 'N/A'
+                except:
+                    result['listening_ports'] = 'N/A'
+                
+                # Total Connections
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("ss -s | grep 'TCP:' | awk '{print $2}'")
+                    result['total_connections'] = stdout.read().decode().strip() or 'N/A'
+                except:
+                    result['total_connections'] = 'N/A'
+                
+                # ============ KERNEL PARAMETRELERİ (PostgreSQL için önemli) ============
+                # Shared Memory Parameters
+                try:
+                    kernel_params = {}
+                    
+                    # SHMMAX - Maximum shared memory segment size
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n kernel.shmmax 2>/dev/null", timeout=3)
+                    shmmax = stdout.read().decode().strip()
+                    if shmmax:
+                        # Bytes'ı GB'ye çevir
+                        shmmax_gb = int(shmmax) / (1024**3) if shmmax.isdigit() else 0
+                        kernel_params['shmmax'] = f"{shmmax} bytes ({shmmax_gb:.2f} GB)"
+                    else:
+                        kernel_params['shmmax'] = 'N/A'
+                    
+                    # SHMALL - Total amount of shared memory available
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n kernel.shmall 2>/dev/null", timeout=3)
+                    shmall = stdout.read().decode().strip()
+                    if shmall:
+                        # Pages'i GB'ye çevir (4KB page size varsayımı)
+                        shmall_gb = (int(shmall) * 4096) / (1024**3) if shmall.isdigit() else 0
+                        kernel_params['shmall'] = f"{shmall} pages ({shmall_gb:.2f} GB)"
+                    else:
+                        kernel_params['shmall'] = 'N/A'
+                    
+                    # SHMMNI - Maximum number of shared memory segments
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n kernel.shmmni 2>/dev/null", timeout=3)
+                    kernel_params['shmmni'] = stdout.read().decode().strip() or 'N/A'
+                    
+                    # Semaphore Parameters (SEMMSL, SEMMNS, SEMOPM, SEMMNI)
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n kernel.sem 2>/dev/null", timeout=3)
+                    sem_params = stdout.read().decode().strip()
+                    if sem_params:
+                        parts = sem_params.split()
+                        if len(parts) >= 4:
+                            kernel_params['semmsl'] = f"{parts[0]} (max semaphores per array)"
+                            kernel_params['semmns'] = f"{parts[1]} (max semaphores system wide)"
+                            kernel_params['semopm'] = f"{parts[2]} (max ops per semop call)"
+                            kernel_params['semmni'] = f"{parts[3]} (max semaphore arrays)"
+                        else:
+                            kernel_params['sem'] = sem_params
+                    else:
+                        kernel_params['sem'] = 'N/A'
+                    
+                    # VM Dirty Parameters (Write performance için önemli)
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.dirty_background_ratio 2>/dev/null", timeout=3)
+                    kernel_params['vmdirty_background_ratio'] = stdout.read().decode().strip() or 'N/A'
+                    
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.dirty_ratio 2>/dev/null", timeout=3)
+                    kernel_params['vmdirty_ratio'] = stdout.read().decode().strip() or 'N/A'
+                    
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.dirty_background_bytes 2>/dev/null", timeout=3)
+                    dirty_bg_bytes = stdout.read().decode().strip()
+                    if dirty_bg_bytes and dirty_bg_bytes != '0':
+                        dirty_bg_mb = int(dirty_bg_bytes) / (1024**2) if dirty_bg_bytes.isdigit() else 0
+                        kernel_params['vmdirty_background_bytes'] = f"{dirty_bg_bytes} bytes ({dirty_bg_mb:.2f} MB)"
+                    else:
+                        kernel_params['vmdirty_background_bytes'] = '0 (disabled)'
+                    
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.dirty_bytes 2>/dev/null", timeout=3)
+                    dirty_bytes = stdout.read().decode().strip()
+                    if dirty_bytes and dirty_bytes != '0':
+                        dirty_mb = int(dirty_bytes) / (1024**2) if dirty_bytes.isdigit() else 0
+                        kernel_params['vmdirty_bytes'] = f"{dirty_bytes} bytes ({dirty_mb:.2f} MB)"
+                    else:
+                        kernel_params['vmdirty_bytes'] = '0 (disabled)'
+                    
+                    # VM Swappiness
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.swappiness 2>/dev/null", timeout=3)
+                    swappiness = stdout.read().decode().strip()
+                    kernel_params['vmswappiness'] = swappiness if swappiness else 'N/A'
+                    if swappiness and swappiness.isdigit():
+                        swap_val = int(swappiness)
+                        if swap_val > 60:
+                            kernel_params['vmswappiness'] += ' (Yüksek - Disk I/O artabilir)'
+                        elif swap_val < 10:
+                            kernel_params['vmswappiness'] += ' (Düşük - PostgreSQL için iyi)'
+                        else:
+                            kernel_params['vmswappiness'] += ' (Normal)'
+                    
+                    # Kernel Scheduler Autogroup
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n kernel.sched_autogroup_enabled 2>/dev/null", timeout=3)
+                    kernel_params['kernelsched_autogroup_enabled'] = stdout.read().decode().strip() or 'N/A'
+                    
+                    # CPU Scaling Governor
+                    stdin, stdout, stderr = ssh.exec_command("cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort | uniq -c", timeout=3)
+                    scaling_gov = stdout.read().decode().strip()
+                    if scaling_gov:
+                        kernel_params['scaling_governor'] = scaling_gov.replace('\n', ', ')
+                    else:
+                        kernel_params['scaling_governor'] = 'N/A'
+                    
+                    # Transparent Huge Pages (PostgreSQL için önemli - kapalı olmalı)
+                    stdin, stdout, stderr = ssh.exec_command("cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null", timeout=3)
+                    thp = stdout.read().decode().strip()
+                    if thp:
+                        # [always] madvise never formatında olabilir
+                        if '[never]' in thp:
+                            kernel_params['transparent_hugepage'] = 'never (PostgreSQL için iyi)'
+                        elif '[always]' in thp:
+                            kernel_params['transparent_hugepage'] = 'always (PostgreSQL için önerilmez!)'
+                        elif '[madvise]' in thp:
+                            kernel_params['transparent_hugepage'] = 'madvise (PostgreSQL için kabul edilebilir)'
+                        else:
+                            kernel_params['transparent_hugepage'] = thp
+                    else:
+                        kernel_params['transparent_hugepage'] = 'N/A'
+                    
+                    # Overcommit Memory
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.overcommit_memory 2>/dev/null", timeout=3)
+                    overcommit = stdout.read().decode().strip()
+                    if overcommit:
+                        if overcommit == '0':
+                            kernel_params['vm_overcommit_memory'] = '0 (Heuristic - varsayılan)'
+                        elif overcommit == '1':
+                            kernel_params['vm_overcommit_memory'] = '1 (Always overcommit)'
+                        elif overcommit == '2':
+                            kernel_params['vm_overcommit_memory'] = '2 (Never overcommit - PostgreSQL için güvenli)'
+                        else:
+                            kernel_params['vm_overcommit_memory'] = overcommit
+                    else:
+                        kernel_params['vm_overcommit_memory'] = 'N/A'
+                    
+                    # Overcommit Ratio
+                    stdin, stdout, stderr = ssh.exec_command("sysctl -n vm.overcommit_ratio 2>/dev/null", timeout=3)
+                    kernel_params['vm_overcommit_ratio'] = stdout.read().decode().strip() or 'N/A'
+                    
+                    # Tüm parametreleri JSON formatında sakla
+                    import json
+                    result['kernel_params'] = json.dumps(kernel_params)
+                    result['kernel_params_summary'] = f"SHMMAX: {kernel_params.get('shmmax', 'N/A')}, Swappiness: {kernel_params.get('vmswappiness', 'N/A')}, THP: {kernel_params.get('transparent_hugepage', 'N/A')}"
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Kernel parameters exception: {e}")
+                    result['kernel_params'] = '{}'
+                    result['kernel_params_summary'] = 'N/A'
+                
+                # ============ POSTGRESQL DETAYLI BİLGİLER ============
+                if result.get('postgresql_status') == 'Var':
+                    # PostgreSQL bağlantı stringi oluştur (eğer local PostgreSQL varsa)
+                    # Çoğu durumda peer authentication ile bağlanabiliriz
+                    pg_host = server['ip']
+                    pg_port = '5432'
+                    
+                    # Port bilgisini bul (ss veya netstat ile)
+                    try:
+                        stdin, stdout, stderr = ssh.exec_command("ss -tlnp 2>/dev/null | grep postgres | awk '{print $4}' | grep -oE '[0-9]+$' | head -1")
+                        detected_port = stdout.read().decode().strip()
+                        if detected_port:
+                            pg_port = detected_port
+                    except:
+                        pass
+                    
+                    # Sudo helper function - şifre ile veya şifresiz sudo
+                    def sudo_exec(command, use_password=True, timeout_sec=5):
+                        """
+                        Sudo komutu çalıştırır. Önce şifresiz (-n) dener, 
+                        çalışmazsa SSH şifresi ile dener.
+                        timeout_sec: Komut için maksimum bekleme süresi (saniye)
+                        """
+                        try:
+                            # Önce şifresiz sudo dene (-n flag) - timeout ile
+                            timeout_cmd = f"timeout {timeout_sec} sudo -n {command} 2>&1"
+                            stdin, stdout, stderr = ssh.exec_command(timeout_cmd, timeout=timeout_sec + 2)
+                            output = stdout.read().decode().strip()
+                            error = stderr.read().decode().strip()
+                            
+                            # Eğer şifre istiyorsa ve use_password=True ise, şifre ile dene
+                            if use_password and ('password' in output.lower() or 'password' in error.lower()):
+                                # -S flag: stdin'den şifre oku, 2>/dev/null ile sudo mesajlarını gizle
+                                # timeout ile çalıştır
+                                timeout_cmd = f"timeout {timeout_sec} bash -c \"echo '{password}' | sudo -S {command} 2>/dev/null\""
+                                stdin, stdout, stderr = ssh.exec_command(timeout_cmd, timeout=timeout_sec + 2)
+                                output = stdout.read().decode().strip()
+                                error = stderr.read().decode().strip()
+                                
+                                # Sudo mesajlarını temizle
+                                # "[sudo] password for xxx:" gibi satırları kaldır
+                                lines = output.split('\n')
+                                cleaned_lines = []
+                                for line in lines:
+                                    # Sudo password mesajlarını atla
+                                    if not ('[sudo]' in line.lower() and 'password' in line.lower()):
+                                        cleaned_lines.append(line)
+                                output = '\n'.join(cleaned_lines).strip()
+                            
+                            # Timeout kontrolü
+                            if not output or 'timed out' in error.lower():
+                                return None, 'timeout'
+                            
+                            return output, None
+                        except Exception as e:
+                            return None, str(e)
+                    
+                    # Sudo yetkisini test et (debug için)
+                    sudo_works = False
+                    try:
+                        test_output, test_error = sudo_exec("-u postgres psql --version", timeout_sec=3)
+                        if test_output and 'PostgreSQL' in test_output:
+                            sudo_works = True
+                            print(f"[DEBUG] Sudo yetkisi çalışıyor: {test_output}")
+                        else:
+                            print(f"[DEBUG] Sudo yetkisi çalışmıyor. Output: {test_output}, Error: {test_error}")
+                    except Exception as e:
+                        print(f"[DEBUG] Sudo test hatası: {e}")
+                    
+                    # PostgreSQL Connection Count
+                    try:
+                        # Yöntem 1: Sudo ile (en doğru) - şifre ile deneyecek - timeout 3 saniye
+                        pg_conn_count, error = sudo_exec("-u postgres psql -t -c 'SELECT count(*) FROM pg_stat_activity;'", timeout_sec=3)
+                        
+                        print(f"[DEBUG] Connection count output: '{pg_conn_count}', error: '{error}'")
+                        
+                        # Eğer sudo çalışmazsa veya hata varsa alternatif yöntem
+                        if not pg_conn_count or 'error' in str(pg_conn_count).lower() or error:
+                            print(f"[DEBUG] Sudo ile bağlantı sayısı alınamadı, alternatif yöntem deneniyor")
+                            # Yöntem 2: netstat/ss ile bağlantı sayısı (yaklaşık)
+                            stdin, stdout, stderr = ssh.exec_command(f"ss -tn 2>/dev/null | grep ':{pg_port}' | grep ESTAB | wc -l", timeout=3)
+                            pg_conn_count = stdout.read().decode().strip()
+                            if pg_conn_count:
+                                pg_conn_count = f"~{pg_conn_count} (tahmini)"
+                        
+                        result['pg_connection_count'] = pg_conn_count if pg_conn_count else 'N/A'
+                    except Exception as e:
+                        print(f"[DEBUG] Connection count exception: {e}")
+                        result['pg_connection_count'] = 'N/A'
+                    
+                    # PostgreSQL Max Connections
+                    try:
+                        # Yöntem 1: Sudo ile psql (şifre ile) - timeout 3 saniye
+                        max_conn, error = sudo_exec("-u postgres psql -t -c 'SHOW max_connections;'", timeout_sec=3)
+                        
+                        # Yöntem 2: postgresql.conf dosyasından oku
+                        if not max_conn or error or not max_conn.replace(' ', '').isdigit():
+                            stdin, stdout, stderr = ssh.exec_command("find /etc/postgresql /var/lib/postgresql -name 'postgresql.conf' 2>/dev/null | head -1 | xargs grep -E '^max_connections' | cut -d'=' -f2 | tr -d ' '", timeout=3)
+                            conf_max_conn = stdout.read().decode().strip()
+                            if conf_max_conn:
+                                max_conn = conf_max_conn
+                        
+                        # Yöntem 3: Varsayılan değer (100)
+                        if not max_conn or not max_conn.replace('~', '').strip().isdigit():
+                            max_conn = '100 (varsayılan)'
+                        
+                        result['pg_max_connections'] = max_conn if max_conn else 'N/A'
+                    except:
+                        result['pg_max_connections'] = 'N/A'
+                    
+                    # PostgreSQL Databases - İsimler VE Boyutlar (HIZLI)
+                    try:
+                        print(f"[DEBUG] PostgreSQL database listesi alınıyor (hızlı yöntem)...")
+                        
+                        # Yöntem 1: Database isimleri ve boyutları (timeout 3s)
+                        dbs, error = sudo_exec("-u postgres psql -t -c \"SELECT datname || ' (' || pg_size_pretty(pg_database_size(datname)) || ')' FROM pg_database WHERE datistemplate = false ORDER BY pg_database_size(datname) DESC LIMIT 20;\"", timeout_sec=3)
+                        
+                        print(f"[DEBUG] Database query output (first 100 chars): '{dbs[:100] if dbs else 'empty'}', error: '{error}'")
+                        
+                        # Eğer timeout veya hata oluşursa basit liste
+                        if not dbs or error == 'timeout' or len(dbs.strip()) < 3:
+                            print(f"[DEBUG] Boyutlu liste alınamadı, sadece isimler deneniyor...")
+                            # Sadece isimler (daha hızlı)
+                            dbs, error = sudo_exec("-u postgres psql -t -c \"SELECT datname FROM pg_database WHERE datistemplate = false LIMIT 50;\"", timeout_sec=2)
+                            print(f"[DEBUG] Database names output: '{dbs[:100] if dbs else 'empty'}', error: '{error}'")
+                        
+                        # Son çare: base directory count
+                        if not dbs or error == 'timeout' or len(dbs.strip()) < 2:
+                            print(f"[DEBUG] Sudo başarısız, sadece sayı döndürülüyor...")
+                            dbs = f"Database isimleri alınamadı (timeout)"
+                        
+                        result['pg_databases'] = dbs.replace('\n', ', ') if dbs else 'N/A'
+                        result['pg_databases_with_sizes'] = dbs if dbs and '(' in dbs else 'N/A'
+                        
+                        print(f"[DEBUG] Final pg_databases (first 100 chars): '{result['pg_databases'][:100] if result['pg_databases'] else 'empty'}'")
+                    except Exception as e:
+                        print(f"[DEBUG] Database list exception: {e}")
+                        result['pg_databases'] = 'Hata: ' + str(e)
+                        result['pg_databases_with_sizes'] = 'N/A'
+                    
+                    # PostgreSQL Total Database Size
+                    try:
+                        # Yöntem 1: Sudo ile psql (şifre ile) - timeout 3 saniye
+                        total_size, error = sudo_exec("-u postgres psql -t -c \"SELECT pg_size_pretty(sum(pg_database_size(datname))::bigint) FROM pg_database WHERE datistemplate = false;\"", timeout_sec=3)
+                        
+                        # Yöntem 2: du ile data directory boyutu (yaklaşık)
+                        if not total_size or error:
+                            stdin, stdout, stderr = ssh.exec_command("du -sh /var/lib/postgresql/*/main 2>/dev/null | awk '{print $1}' | head -1", timeout=3)
+                            du_size = stdout.read().decode().strip()
+                            if du_size:
+                                total_size = f"~{du_size} (tahmini)"
+                        
+                        result['pg_total_size'] = total_size if total_size else 'N/A'
+                    except:
+                        result['pg_total_size'] = 'N/A'
+                    
+                    # PostgreSQL Data Directory
+                    try:
+                        # Yöntem 1: Sudo ile psql (şifre ile) - timeout 3 saniye
+                        data_dir, error = sudo_exec("-u postgres psql -t -c 'SHOW data_directory;'", timeout_sec=3)
+                        
+                        # Yöntem 2: postgresql.conf dosyasından oku
+                        if not data_dir or error:
+                            stdin, stdout, stderr = ssh.exec_command("find /etc/postgresql /var/lib/postgresql -name 'postgresql.conf' 2>/dev/null | head -1 | xargs grep -E '^data_directory' | cut -d'=' -f2 | tr -d \"' \"", timeout=3)
+                            conf_data_dir = stdout.read().decode().strip()
+                            if conf_data_dir:
+                                data_dir = conf_data_dir
+                        
+                        # Yöntem 3: Standart konumları kontrol et
+                        if not data_dir or error:
+                            stdin, stdout, stderr = ssh.exec_command("ls -d /var/lib/postgresql/*/main 2>/dev/null | head -1", timeout=3)
+                            found_dir = stdout.read().decode().strip()
+                            if found_dir:
+                                data_dir = found_dir
+                        
+                        result['pg_data_directory'] = data_dir if data_dir else 'N/A'
+                    except:
+                        result['pg_data_directory'] = 'N/A'
+                    
+                    # PostgreSQL Port Detection - Geliştirilmiş
+                    try:
+                        pg_port = None
+                        
+                        # Method 1: From PostgreSQL (şifre ile) - timeout 3 saniye
+                        port, error = sudo_exec("-u postgres psql -t -c 'SHOW port;'", timeout_sec=3)
+                        if port and not error and port.strip().isdigit():
+                            pg_port = port.strip()
+                            print(f"[DEBUG] PostgreSQL port (psql): {pg_port}")
+                        
+                        # Method 2: From listening ports - netstat ile
+                        if not pg_port:
+                            stdin, stdout, stderr = ssh.exec_command("sudo netstat -plnt | grep postgres | awk -F' ' '{print $4}' | cut -d: -f2", timeout=3)
+                            netstat_port = stdout.read().decode().strip()
+                            if netstat_port and netstat_port.isdigit():
+                                pg_port = netstat_port
+                                print(f"[DEBUG] PostgreSQL port (netstat): {pg_port}")
+                        
+                        # Method 3: ss komutu ile
+                        if not pg_port:
+                            stdin, stdout, stderr = ssh.exec_command("ss -tlnp | grep postgres | awk '{print $4}' | cut -d':' -f2 | sort -u | head -1", timeout=3)
+                            ss_port = stdout.read().decode().strip()
+                            if ss_port and ss_port.isdigit():
+                                pg_port = ss_port
+                                print(f"[DEBUG] PostgreSQL port (ss): {pg_port}")
+                        
+                        # Method 4: postgresql.conf dosyasından
+                        if not pg_port:
+                            stdin, stdout, stderr = ssh.exec_command("find /etc/postgresql /var/lib/postgresql -name 'postgresql.conf' 2>/dev/null | head -1 | xargs grep -E '^port' | cut -d'=' -f2 | tr -d ' '", timeout=3)
+                            conf_port = stdout.read().decode().strip()
+                            if conf_port and conf_port.isdigit():
+                                pg_port = conf_port
+                                print(f"[DEBUG] PostgreSQL port (config): {pg_port}")
+                        
+                        result['pg_port'] = pg_port if pg_port else 'N/A'
+                        print(f"[DEBUG] Final PostgreSQL port: {result['pg_port']}")
+                        
+                    except Exception as e:
+                        print(f"[DEBUG] PostgreSQL port detection exception: {e}")
+                        result['pg_port'] = 'N/A'
+                    
+                    # PostgreSQL Config Helper Function
+                    def get_pg_config(param_name, default='N/A'):
+                        try:
+                            # Yöntem 1: Sudo ile psql SHOW (şifre ile) - timeout 3 saniye
+                            value, error = sudo_exec(f"-u postgres psql -t -c 'SHOW {param_name};'", timeout_sec=3)
+                            
+                            # Yöntem 2: postgresql.conf dosyasından oku
+                            if not value or error:
+                                stdin, stdout, stderr = ssh.exec_command(f"find /etc/postgresql /var/lib/postgresql -name 'postgresql.conf' 2>/dev/null | head -1 | xargs grep -E '^{param_name}' | cut -d'=' -f2 | cut -d'#' -f1 | tr -d \"' \" | xargs", timeout=3)
+                                conf_value = stdout.read().decode().strip()
+                                if conf_value:
+                                    value = conf_value
+                            
+                            return value if value else default
+                        except:
+                            return default
+                    
+                    # PostgreSQL Shared Buffers
+                    result['pg_shared_buffers'] = get_pg_config('shared_buffers', '128MB (varsayılan)')
+                    
+                    # PostgreSQL Work Mem
+                    result['pg_work_mem'] = get_pg_config('work_mem', '4MB (varsayılan)')
+                    
+                    # PostgreSQL Effective Cache Size
+                    result['pg_effective_cache_size'] = get_pg_config('effective_cache_size', '4GB (varsayılan)')
+                    
+                    # PostgreSQL Maintenance Work Mem
+                    result['pg_maintenance_work_mem'] = get_pg_config('maintenance_work_mem', '64MB (varsayılan)')
+                    
+                    # PostgreSQL WAL Level
+                    result['pg_wal_level'] = get_pg_config('wal_level', 'replica (varsayılan)')
+                    
+                    # PostgreSQL Archive Mode
+                    result['pg_archive_mode'] = get_pg_config('archive_mode', 'off (varsayılan)')
+                    
+                    # PostgreSQL Replication Slots
+                    try:
+                        # Sudo ile psql (şifre ile) - timeout 3 saniye
+                        slots, error = sudo_exec("-u postgres psql -t -c 'SELECT slot_name, slot_type, active FROM pg_replication_slots;'", timeout_sec=3)
+                        result['pg_replication_slots'] = slots.replace('\n', ' | ') if slots and not error else 'None'
+                    except:
+                        result['pg_replication_slots'] = 'N/A'
+                    
+                    # PostgreSQL Uptime
+                    try:
+                        # Yöntem 1: Sudo ile psql (şifre ile) - timeout 3 saniye
+                        uptime, error = sudo_exec("-u postgres psql -t -c \"SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time()) as uptime;\"", timeout_sec=3)
+                        
+                        # Yöntem 2: ps komutu ile postgres process uptime
+                        if not uptime or error:
+                            stdin, stdout, stderr = ssh.exec_command("ps -eo pid,etime,cmd | grep '[p]ostgres.*main' | head -1 | awk '{print $2}'", timeout=3)
+                            ps_uptime = stdout.read().decode().strip()
+                            if ps_uptime:
+                                uptime = ps_uptime
+                        
+                        result['pg_uptime'] = uptime if uptime else 'N/A'
+                    except:
+                        result['pg_uptime'] = 'N/A'
+                    
+                    # ============ POSTGRESQL BACKUP ARAÇLARI ============
+                    # Backup araçlarını kontrol et
+                    
+                    # pgBackRest - sudo ile çalıştır
+                    result['pgbackrest_details'] = 'Yok'
+                    try:
+                        # Önce kurulu mu kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v pgbackrest 2>/dev/null", timeout=3)
+                        pgbackrest_path = stdout.read().decode().strip()
+                        
+                        if pgbackrest_path:
+                            result['pgbackrest_status'] = 'Var'
+                            
+                            # sudo ile pgbackrest info çalıştır (permission sorununu çözer) - timeout 5 saniye
+                            pgbackrest_output, error = sudo_exec("pgbackrest info 2>&1", timeout_sec=5)
+                            
+                            if pgbackrest_output and not error:
+                                # Çıktıyı temizle - ilk 15 satır
+                                lines = [l.strip() for l in pgbackrest_output.split('\n') if l.strip()][:15]
+                                result['pgbackrest_details'] = '\n'.join(lines)
+                            else:
+                                result['pgbackrest_details'] = f"Kurulu: {pgbackrest_path}\nBilgi alınamadı"
+                        else:
+                            result['pgbackrest_status'] = 'Yok'
+                            result['pgbackrest_details'] = 'Yok'
+                    except Exception as e:
+                        result['pgbackrest_status'] = 'Yok'
+                        result['pgbackrest_details'] = 'N/A'
+                    
+                    # pg_probackup - sudo ile çalıştır
+                    result['pg_probackup_status'] = 'Yok'
+                    result['pg_probackup_path'] = 'N/A'
+                    result['pg_probackup_details'] = 'Yok'
+                    try:
+                        stdin, stdout, stderr = ssh.exec_command("command -v pg_probackup 2>/dev/null", timeout=3)
+                        pg_probackup_path = stdout.read().decode().strip()
+                        
+                        if pg_probackup_path:
+                            result['pg_probackup_status'] = 'Var'
+                            result['pg_probackup_path'] = pg_probackup_path
+                            
+                            # pg_probackup ile backup dizinlerini listele - timeout 5 saniye
+                            probackup_output, error = sudo_exec("pg_probackup show 2>&1", timeout_sec=5)
+                            if probackup_output and not error:
+                                lines = [l.strip() for l in probackup_output.split('\n') if l.strip()][:10]
+                                result['pg_probackup_details'] = '\n'.join(lines)
+                            else:
+                                result['pg_probackup_details'] = f"Kurulu: {pg_probackup_path}"
+                    except:
+                        pass
+                    
+                    # pgBarman - sudo ile çalıştır
+                    result['pgbarman_status'] = 'Yok'
+                    result['pgbarman_details'] = 'Yok'
+                    try:
+                        stdin, stdout, stderr = ssh.exec_command("command -v barman 2>/dev/null", timeout=3)
+                        barman_path = stdout.read().decode().strip()
+                        
+                        if barman_path:
+                            result['pgbarman_status'] = 'Var'
+                            
+                            # Barman server listesini al (sudo ile) - timeout 5 saniye
+                            barman_output, error = sudo_exec("barman list-server 2>&1", timeout_sec=5)
+                            
+                            if barman_output and not error:
+                                # Barman diagnose ile detaylı bilgi - timeout 5 saniye
+                                barman_detail, detail_error = sudo_exec("barman diagnose 2>&1 | grep -A5 'server_name' | head -10", timeout_sec=5)
+                                
+                                if barman_detail and not detail_error:
+                                    result['pgbarman_details'] = f"Path: {barman_path}\n\nServers:\n{barman_output}\n\nDiagnose:\n{barman_detail}"
+                                else:
+                                    result['pgbarman_details'] = f"Path: {barman_path}\n\nServers:\n{barman_output}"
+                            else:
+                                result['pgbarman_details'] = f"Path: {barman_path}\nServer listesi alınamadı"
+                    except:
+                        pass
+                    
+                    # Backup info - tüm bilgileri birleştir
+                    backup_summary = []
+                    if result['pgbackrest_status'] == 'Var':
+                        backup_summary.append(f"pgBackRest: Kurulu")
+                    if result['pg_probackup_status'] == 'Var':
+                        backup_summary.append(f"pg_probackup: Kurulu")
+                    if result['pgbarman_status'] == 'Var':
+                        backup_summary.append(f"pgBarman: Kurulu")
+                    
+                    result['backup_info'] = ' | '.join(backup_summary) if backup_summary else 'Hiçbir backup aracı bulunamadı'
+                    
+                    # ============ HIGH AVAILABILITY ARAÇLARI ============
+                    
+                    # Patroni kontrolü - Geliştirilmiş
+                    result['patroni_status'] = 'Yok'
+                    result['patroni_details'] = 'N/A'
+                    try:
+                        print(f"[DEBUG] Patroni kontrolü başlatılıyor...")
+                        
+                        # Yöntem 1: Patroni komutunun varlığını kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v patroni > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        patroni_cmd_check = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patroni command check result: '{patroni_cmd_check}'")
+                        
+                        # Yöntem 1b: Patroni paket kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("rpm -q patroni 2>/dev/null || dpkg -l | grep patroni 2>/dev/null | head -1", timeout=3)
+                        patroni_package = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patroni package check result: '{patroni_package}'")
+                        
+                        # Yöntem 2: Patroni process kontrolü (daha geniş arama)
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -v grep | grep -i patroni | wc -l", timeout=3)
+                        patroni_process = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patroni process count: '{patroni_process}'")
+                        
+                        # Yöntem 2b: Patroni process detayları
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -v grep | grep -i patroni | head -3", timeout=3)
+                        patroni_process_details = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patroni process details: '{patroni_process_details}'")
+                        
+                        # Yöntem 3: patronictl komutunun varlığını kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v patronictl > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        patronictl_cmd_check = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patronictl command check result: '{patronictl_cmd_check}'")
+                        
+                        # Yöntem 4: Patroni config dosyası arama (daha geniş)
+                        stdin, stdout, stderr = ssh.exec_command("find /etc /opt /usr/local -name '*patroni*' -type f 2>/dev/null | head -5", timeout=3)
+                        patroni_files = stdout.read().decode().strip()
+                        print(f"[DEBUG] Patroni files found: '{patroni_files}'")
+                        
+                        print(f"[DEBUG] Patroni command check: {patroni_cmd_check}, Process count: {patroni_process}, Patronictl check: {patronictl_cmd_check}, Package: {patroni_package}, Files: {patroni_files}")
+                        
+                        if (patroni_cmd_check == 'found' or patronictl_cmd_check == 'found' or 
+                            patroni_package or patroni_files or
+                            (patroni_process and int(patroni_process) > 0)):
+                            result['patroni_status'] = 'Var'
+                            print(f"[DEBUG] Patroni bulundu, detaylar alınıyor...")
+                            
+                            # Patroni config dosyasını bul (birden fazla konum)
+                            patroni_config = None
+                            config_paths = [
+                                "/etc/patroni/patroni.yml",
+                                "/etc/patroni.yml", 
+                                "/opt/patroni/etc/patroni.yml",
+                                "/usr/local/etc/patroni.yml"
+                            ]
+                            
+                            for config_path in config_paths:
+                                stdin, stdout, stderr = ssh.exec_command(f"test -f {config_path} && echo 'exists' || echo 'not_exists'", timeout=2)
+                                if stdout.read().decode().strip() == 'exists':
+                                    patroni_config = config_path
+                                    break
+                            
+                            # Eğer standart konumlarda yoksa find ile ara
+                            if not patroni_config:
+                                stdin, stdout, stderr = ssh.exec_command("find /etc /opt /usr/local -name 'patroni.yml' 2>/dev/null | head -1", timeout=3)
+                                patroni_config = stdout.read().decode().strip()
+                            
+                            print(f"[DEBUG] Patroni config bulundu: {patroni_config}")
+                            
+                            if patroni_config:
+                                # Config'den scope değerini al
+                                stdin, stdout, stderr = ssh.exec_command(f"grep 'scope:' {patroni_config} | awk '{{print $2}}' | head -1", timeout=3)
+                                scope = stdout.read().decode().strip()
+                                
+                                # Config'den diğer önemli bilgileri al
+                                stdin, stdout, stderr = ssh.exec_command(f"grep -E '^name:|^restapi:|^postgresql:' {patroni_config} | head -5", timeout=3)
+                                config_info = stdout.read().decode().strip()
+                                
+                                details = f"Config: {patroni_config}\n"
+                                if scope:
+                                    details += f"Scope: {scope}\n"
+                                if config_info:
+                                    details += f"Config Info:\n{config_info}\n"
+                                if patroni_package:
+                                    details += f"Package: {patroni_package}\n"
+                                if patroni_files:
+                                    details += f"Files Found: {patroni_files}\n"
+                                if patroni_process_details:
+                                    details += f"Process Details:\n{patroni_process_details}\n"
+                                
+                                # patronictl list komutu ile cluster bilgisi al
+                                if patronictl_cmd_check == 'found' and scope:
+                                    print(f"[DEBUG] patronictl list komutu çalıştırılıyor...")
+                                    patronictl_output, error = sudo_exec(f"patronictl -c {patroni_config} list", timeout_sec=8)
+                                    if patronictl_output and not error:
+                                        details += f"\nCluster Status:\n{patronictl_output}"
+                                        print(f"[DEBUG] patronictl output alındı: {len(patronictl_output)} karakter")
+                                    else:
+                                        details += f"\nCluster Status: Alınamadı (Error: {error})"
+                                        print(f"[DEBUG] patronictl hata: {error}")
+                                
+                                # Patroni service durumu
+                                stdin, stdout, stderr = ssh.exec_command("systemctl is-active patroni 2>/dev/null || echo 'inactive'", timeout=3)
+                                service_status = stdout.read().decode().strip()
+                                if service_status != 'inactive':
+                                    details += f"\nService Status: {service_status}"
+                                
+                                result['patroni_details'] = details
+                            else:
+                                result['patroni_details'] = "Patroni bulundu ancak config dosyası bulunamadı"
+                        else:
+                            result['patroni_status'] = 'Yok'
+                            result['patroni_details'] = f"Patroni bulunamadı.\nDebug Info:\n- Command: {patroni_cmd_check}\n- Process: {patroni_process}\n- Patronictl: {patronictl_cmd_check}\n- Package: {patroni_package}\n- Files: {patroni_files}"
+                            print(f"[DEBUG] Patroni bulunamadı - Command: {patroni_cmd_check}, Process: {patroni_process}, Package: {patroni_package}")
+                    except Exception as e:
+                        print(f"[DEBUG] Patroni check exception: {e}")
+                        result['patroni_status'] = 'Yok'
+                        result['patroni_details'] = 'N/A'
+                    
+                    # Repmgr kontrolü - Geliştirilmiş
+                    result['repmgr_status'] = 'Yok'
+                    result['repmgr_details'] = 'N/A'
+                    try:
+                        print(f"[DEBUG] Repmgr kontrolü başlatılıyor...")
+                        
+                        # Yöntem 1: repmgr komutunun varlığını kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v repmgr > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        repmgr_cmd_check = stdout.read().decode().strip()
+                        print(f"[DEBUG] Repmgr command check result: '{repmgr_cmd_check}'")
+                        
+                        # Yöntem 1b: repmgr paket kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("rpm -q repmgr 2>/dev/null || dpkg -l | grep repmgr 2>/dev/null | head -1", timeout=3)
+                        repmgr_package = stdout.read().decode().strip()
+                        print(f"[DEBUG] Repmgr package check result: '{repmgr_package}'")
+                        
+                        # Yöntem 2: repmgr process kontrolü (daha geniş arama)
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -v grep | grep -i repmgr | wc -l", timeout=3)
+                        repmgr_process = stdout.read().decode().strip()
+                        print(f"[DEBUG] Repmgr process count: '{repmgr_process}'")
+                        
+                        # Yöntem 2b: repmgr process detayları
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -v grep | grep -i repmgr | head -3", timeout=3)
+                        repmgr_process_details = stdout.read().decode().strip()
+                        print(f"[DEBUG] Repmgr process details: '{repmgr_process_details}'")
+                        
+                        # Yöntem 3: repmgr dosya arama
+                        stdin, stdout, stderr = ssh.exec_command("find /etc /opt /usr/local -name '*repmgr*' -type f 2>/dev/null | head -5", timeout=3)
+                        repmgr_files = stdout.read().decode().strip()
+                        print(f"[DEBUG] Repmgr files found: '{repmgr_files}'")
+                        
+                        print(f"[DEBUG] Repmgr command check: {repmgr_cmd_check}, Process count: {repmgr_process}, Package: {repmgr_package}, Files: {repmgr_files}")
+                        
+                        if (repmgr_cmd_check == 'found' or repmgr_package or repmgr_files or 
+                            (repmgr_process and int(repmgr_process) > 0)):
+                            result['repmgr_status'] = 'Var'
+                            print(f"[DEBUG] Repmgr bulundu, detaylar alınıyor...")
+                            
+                            # Repmgr config dosyasını bul (birden fazla konum)
+                            repmgr_conf = None
+                            config_paths = [
+                                "/etc/repmgr.conf",
+                                "/etc/postgresql/*/repmgr.conf",
+                                "/var/lib/postgresql/*/repmgr.conf",
+                                "/opt/repmgr/repmgr.conf"
+                            ]
+                            
+                            for config_path in config_paths:
+                                stdin, stdout, stderr = ssh.exec_command(f"find {config_path} 2>/dev/null | head -1", timeout=3)
+                                found_config = stdout.read().decode().strip()
+                                if found_config:
+                                    repmgr_conf = found_config
+                                    break
+                            
+                            # Eğer standart konumlarda yoksa find ile ara
+                            if not repmgr_conf:
+                                stdin, stdout, stderr = ssh.exec_command("find /etc /var/lib/postgresql /opt -name 'repmgr.conf' 2>/dev/null | head -1", timeout=3)
+                                repmgr_conf = stdout.read().decode().strip()
+                            
+                            # Repmgr binary dosyasını bul
+                            stdin, stdout, stderr = ssh.exec_command("which repmgr || find /usr /opt -name 'repmgr' -type f 2>/dev/null | head -1", timeout=3)
+                            repmgr_bin = stdout.read().decode().strip()
+                            
+                            print(f"[DEBUG] Repmgr config: {repmgr_conf}, Binary: {repmgr_bin}")
+                            
+                            if repmgr_conf and repmgr_bin:
+                                details = f"Config: {repmgr_conf}\nBinary: {repmgr_bin}\n"
+                                if repmgr_package:
+                                    details += f"Package: {repmgr_package}\n"
+                                if repmgr_files:
+                                    details += f"Files Found: {repmgr_files}\n"
+                                if repmgr_process_details:
+                                    details += f"Process Details:\n{repmgr_process_details}\n"
+                                
+                                # Config'den önemli bilgileri al
+                                stdin, stdout, stderr = ssh.exec_command(f"grep -E '^cluster=|^node=|^conninfo=' {repmgr_conf} | head -5", timeout=3)
+                                config_info = stdout.read().decode().strip()
+                                if config_info:
+                                    details += f"Config Info:\n{config_info}\n"
+                                
+                                # repmgr cluster show komutu çalıştır
+                                print(f"[DEBUG] repmgr cluster show komutu çalıştırılıyor...")
+                                repmgr_output, error = sudo_exec(f"{repmgr_bin} -f {repmgr_conf} cluster show", timeout_sec=8)
+                                
+                                if repmgr_output and not error:
+                                    details += f"\nCluster Status:\n{repmgr_output}"
+                                    print(f"[DEBUG] repmgr cluster show output alındı: {len(repmgr_output)} karakter")
+                                else:
+                                    details += f"\nCluster Status: Alınamadı (Error: {error})"
+                                    print(f"[DEBUG] repmgr cluster show hata: {error}")
+                                
+                                # repmgr node status komutu
+                                print(f"[DEBUG] repmgr node status komutu çalıştırılıyor...")
+                                node_output, error = sudo_exec(f"{repmgr_bin} -f {repmgr_conf} node status", timeout_sec=5)
+                                if node_output and not error:
+                                    details += f"\nNode Status:\n{node_output}"
+                                    print(f"[DEBUG] repmgr node status output alındı")
+                                
+                                result['repmgr_details'] = details
+                            else:
+                                result['repmgr_details'] = "Repmgr bulundu ancak config veya binary bulunamadı"
+                        else:
+                            result['repmgr_status'] = 'Yok'
+                            result['repmgr_details'] = f"Repmgr bulunamadı.\nDebug Info:\n- Command: {repmgr_cmd_check}\n- Process: {repmgr_process}\n- Package: {repmgr_package}\n- Files: {repmgr_files}"
+                            print(f"[DEBUG] Repmgr bulunamadı - Command: {repmgr_cmd_check}, Process: {repmgr_process}, Package: {repmgr_package}")
+                    except Exception as e:
+                        print(f"[DEBUG] Repmgr check exception: {e}")
+                        result['repmgr_status'] = 'Yok'
+                        result['repmgr_details'] = 'N/A'
+                    
+                    # PAF (Pacemaker) kontrolü - Geliştirilmiş
+                    result['paf_status'] = 'Yok'
+                    result['paf_details'] = 'N/A'
+                    try:
+                        print(f"[DEBUG] PAF/Pacemaker kontrolü başlatılıyor...")
+                        
+                        # Yöntem 1: Pacemaker komutunun varlığını kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v pacemaker > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        pacemaker_cmd_check = stdout.read().decode().strip()
+                        
+                        # Yöntem 2: pcs komutunun varlığını kontrol et
+                        stdin, stdout, stderr = ssh.exec_command("command -v pcs > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        pcs_cmd_check = stdout.read().decode().strip()
+                        
+                        # Yöntem 3: Pacemaker process kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -v grep | grep pacemaker | wc -l", timeout=3)
+                        pacemaker_process = stdout.read().decode().strip()
+                        
+                        # Yöntem 4: Pacemaker service status
+                        stdin, stdout, stderr = ssh.exec_command("systemctl is-active pacemaker 2>/dev/null || echo 'inactive'", timeout=3)
+                        pacemaker_status = stdout.read().decode().strip()
+                        
+                        # Yöntem 5: Corosync service status
+                        stdin, stdout, stderr = ssh.exec_command("systemctl is-active corosync 2>/dev/null || echo 'inactive'", timeout=3)
+                        corosync_status = stdout.read().decode().strip()
+                        
+                        print(f"[DEBUG] Pacemaker cmd: {pacemaker_cmd_check}, PCS cmd: {pcs_cmd_check}, Process: {pacemaker_process}, Service: {pacemaker_status}, Corosync: {corosync_status}")
+                        
+                        if (pacemaker_cmd_check == 'found' or pcs_cmd_check == 'found' or 
+                            pacemaker_status == 'active' or corosync_status == 'active' or
+                            (pacemaker_process and int(pacemaker_process) > 0)):
+                            result['paf_status'] = 'Var'
+                            print(f"[DEBUG] PAF/Pacemaker bulundu, detaylar alınıyor...")
+                            
+                            details = f"Pacemaker Status: {pacemaker_status}\n"
+                            details += f"Corosync Status: {corosync_status}\n"
+                            if pacemaker_cmd_check == 'found':
+                                details += f"Pacemaker Binary: Available\n"
+                            if pcs_cmd_check == 'found':
+                                details += f"PCS Command: Available\n"
+                            
+                            # PCS status komutu (en detaylı bilgi)
+                            if pcs_cmd_check == 'found':
+                                print(f"[DEBUG] pcs status komutu çalıştırılıyor...")
+                                pcs_output, error = sudo_exec("pcs status 2>&1", timeout_sec=8)
+                                if pcs_output and not error:
+                                    details += f"\nCluster Status:\n{pcs_output[:800]}"
+                                    print(f"[DEBUG] pcs status output alındı: {len(pcs_output)} karakter")
+                                else:
+                                    details += f"\nCluster Status: Alınamadı (Error: {error})"
+                                    print(f"[DEBUG] pcs status hata: {error}")
+                                
+                                # PCS resource status
+                                print(f"[DEBUG] pcs resource status komutu çalıştırılıyor...")
+                                pcs_res_output, error = sudo_exec("pcs resource status 2>&1", timeout_sec=5)
+                                if pcs_res_output and not error:
+                                    details += f"\nResource Status:\n{pcs_res_output[:400]}"
+                                    print(f"[DEBUG] pcs resource status output alındı")
+                            
+                            # Crm_mon komutu (alternatif)
+                            stdin, stdout, stderr = ssh.exec_command("command -v crm_mon > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                            crm_mon_check = stdout.read().decode().strip()
+                            if crm_mon_check == 'found':
+                                print(f"[DEBUG] crm_mon komutu çalıştırılıyor...")
+                                crm_output, error = sudo_exec("crm_mon -1 2>&1", timeout_sec=5)
+                                if crm_output and not error:
+                                    details += f"\nCRM Status:\n{crm_output[:400]}"
+                                    print(f"[DEBUG] crm_mon output alındı")
+                            
+                            result['paf_details'] = details
+                        else:
+                            result['paf_status'] = 'Yok'
+                            print(f"[DEBUG] PAF/Pacemaker bulunamadı")
+                    except Exception as e:
+                        print(f"[DEBUG] PAF check exception: {e}")
+                        result['paf_status'] = 'Yok'
+                        result['paf_details'] = 'N/A'
+                    
+                    # Citus kontrolü (Distributed PostgreSQL) - Geliştirilmiş
+                    result['citus_status'] = 'Yok'
+                    result['citus_details'] = 'N/A'
+                    try:
+                        print(f"[DEBUG] Citus kontrolü başlatılıyor...")
+                        
+                        # Yöntem 1: Citus binary kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("command -v citus > /dev/null && echo 'found' || echo 'not_found'", timeout=3)
+                        citus_cmd_check = stdout.read().decode().strip()
+                        
+                        # Yöntem 2: Citus extension PostgreSQL içinde var mı kontrol et
+                        citus_ext = None
+                        citus_ext_error = None
+                        if result.get('postgresql_status') == 'Var':
+                            print(f"[DEBUG] PostgreSQL aktif, Citus extension kontrol ediliyor...")
+                            citus_ext, citus_ext_error = sudo_exec("-u postgres psql -t -c \"SELECT * FROM pg_extension WHERE extname='citus';\"", timeout_sec=5)
+                        
+                        # Yöntem 3: Citus yapılandırma dosyası kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("find /etc -name '*citus*' -type f 2>/dev/null | head -3", timeout=3)
+                        citus_configs = stdout.read().decode().strip()
+                        
+                        # Yöntem 4: Citus paket kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("rpm -q citus 2>/dev/null || dpkg -l | grep citus 2>/dev/null | head -1", timeout=3)
+                        citus_package = stdout.read().decode().strip()
+                        
+                        print(f"[DEBUG] Citus cmd: {citus_cmd_check}, Extension: {citus_ext[:50] if citus_ext else 'None'}, Configs: {citus_configs}, Package: {citus_package}")
+                        
+                        citus_found = False
+                        details = ""
+                        
+                        if citus_cmd_check == 'found':
+                            citus_found = True
+                            details += "Citus Binary: Available\n"
+                        
+                        if citus_ext and citus_ext.strip() and not citus_ext_error:
+                            citus_found = True
+                            details += "Citus Extension: Active\n"
+                            print(f"[DEBUG] Citus extension bulundu, detaylar alınıyor...")
+                            
+                            # Citus worker node listesi
+                            citus_nodes, error = sudo_exec("-u postgres psql -t -c \"SELECT * FROM citus_get_active_worker_nodes();\"", timeout_sec=5)
+                            if citus_nodes and not error:
+                                details += f"Worker Nodes:\n{citus_nodes}\n"
+                                print(f"[DEBUG] Citus worker nodes alındı")
+                            
+                            # Citus coordinator bilgisi
+                            citus_coord, error = sudo_exec("-u postgres psql -t -c \"SELECT * FROM citus_get_coordinator_node();\"", timeout_sec=5)
+                            if citus_coord and not error:
+                                details += f"Coordinator:\n{citus_coord}\n"
+                                print(f"[DEBUG] Citus coordinator bilgisi alındı")
+                            
+                            # Citus cluster bilgisi
+                            citus_cluster, error = sudo_exec("-u postgres psql -t -c \"SELECT * FROM citus_get_cluster_health();\"", timeout_sec=5)
+                            if citus_cluster and not error:
+                                details += f"Cluster Health:\n{citus_cluster}\n"
+                                print(f"[DEBUG] Citus cluster health alındı")
+                        
+                        if citus_configs:
+                            citus_found = True
+                            details += f"Config Files: {citus_configs}\n"
+                        
+                        if citus_package:
+                            citus_found = True
+                            details += f"Package: {citus_package}\n"
+                        
+                        # Citus yapılandırma dosyası içeriği
+                        if citus_configs:
+                            config_file = citus_configs.split('\n')[0]
+                            stdin, stdout, stderr = ssh.exec_command(f"cat {config_file} 2>/dev/null | head -10", timeout=3)
+                            citus_conf_content = stdout.read().decode().strip()
+                            if citus_conf_content:
+                                details += f"Config Content:\n{citus_conf_content}\n"
+                        
+                        if citus_found:
+                            result['citus_status'] = 'Var'
+                            result['citus_details'] = details
+                            print(f"[DEBUG] Citus bulundu ve detaylar alındı")
+                        else:
+                            result['citus_status'] = 'Yok'
+                            print(f"[DEBUG] Citus bulunamadı")
+                    except Exception as e:
+                        print(f"[DEBUG] Citus check exception: {e}")
+                        result['citus_status'] = 'Yok'
+                        result['citus_details'] = 'N/A'
+                    
+                    # Streaming Replication Detayları - Geliştirilmiş
+                    result['streaming_replication_status'] = 'N/A'
+                    result['streaming_replication_details'] = 'N/A'
+                    try:
+                        print(f"[DEBUG] Streaming Replication kontrolü başlatılıyor...")
+                        
+                        # Yöntem 1: WAL sender ve receiver process kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("ps aux | grep -E 'wal sender|wal receiver' | grep -v grep", timeout=3)
+                        wal_processes = stdout.read().decode().strip()
+                        
+                        # Yöntem 2: pgrep ile process kontrolü
+                        stdin, stdout, stderr = ssh.exec_command("pgrep -fl 'wal sender process' | wc -l", timeout=3)
+                        wal_sender_count_cmd = stdout.read().decode().strip()
+                        
+                        stdin, stdout, stderr = ssh.exec_command("pgrep -fl 'wal receiver process' | wc -l", timeout=3)
+                        wal_receiver_count_cmd = stdout.read().decode().strip()
+                        
+                        # Yöntem 3: PostgreSQL replication ayarları kontrolü
+                        wal_level = None
+                        max_wal_senders = None
+                        if result.get('postgresql_status') == 'Var':
+                            wal_level, _ = sudo_exec("-u postgres psql -t -c \"SHOW wal_level;\"", timeout_sec=3)
+                            max_wal_senders, _ = sudo_exec("-u postgres psql -t -c \"SHOW max_wal_senders;\"", timeout_sec=3)
+                        
+                        print(f"[DEBUG] WAL processes: {wal_processes[:100] if wal_processes else 'None'}, Sender count: {wal_sender_count_cmd}, Receiver count: {wal_receiver_count_cmd}, WAL Level: {wal_level}, Max WAL Senders: {max_wal_senders}")
+                        
+                        if wal_processes or (wal_sender_count_cmd and int(wal_sender_count_cmd) > 0) or (wal_receiver_count_cmd and int(wal_receiver_count_cmd) > 0):
+                            # WAL sender var mı?
+                            wal_sender_count = wal_processes.count('wal sender') if wal_processes else 0
+                            wal_receiver_count = wal_processes.count('wal receiver') if wal_processes else 0
+                            
+                            # pgrep sonuçlarını da ekle
+                            if wal_sender_count_cmd and wal_sender_count_cmd.isdigit():
+                                wal_sender_count = max(wal_sender_count, int(wal_sender_count_cmd))
+                            if wal_receiver_count_cmd and wal_receiver_count_cmd.isdigit():
+                                wal_receiver_count = max(wal_receiver_count, int(wal_receiver_count_cmd))
+                            
+                            details = ""
+                            if wal_level:
+                                details += f"WAL Level: {wal_level.strip()}\n"
+                            if max_wal_senders:
+                                details += f"Max WAL Senders: {max_wal_senders.strip()}\n"
+                            
+                            if wal_sender_count > 0:
+                                result['streaming_replication_status'] = f'Master (WAL Sender: {wal_sender_count})'
+                                details += f"Role: Master/Primary\nWAL Sender Processes: {wal_sender_count}\n"
+                                
+                                # pg_stat_replication'dan detaylar al
+                                print(f"[DEBUG] pg_stat_replication sorgusu çalıştırılıyor...")
+                                repl_details, error = sudo_exec("-u postgres psql -t -c \"SELECT application_name, client_addr, state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn FROM pg_stat_replication;\"", timeout_sec=5)
+                                
+                                if repl_details and not error:
+                                    details += f"\nReplication Status:\n{repl_details}"
+                                    print(f"[DEBUG] pg_stat_replication output alındı")
+                                else:
+                                    details += f"\nReplication Status: Detay alınamadı (Error: {error})"
+                                    print(f"[DEBUG] pg_stat_replication hata: {error}")
+                                
+                                # WAL sender process detayları
+                                stdin, stdout, stderr = ssh.exec_command("pgrep -fl 'wal sender process' | head -5", timeout=3)
+                                sender_processes = stdout.read().decode().strip()
+                                if sender_processes:
+                                    details += f"\nWAL Sender Processes:\n{sender_processes}"
+                                    
+                            elif wal_receiver_count > 0:
+                                result['streaming_replication_status'] = 'Replica (WAL Receiver aktif)'
+                                details += f"Role: Replica/Standby\nWAL Receiver Process: Active\n"
+                                
+                                # pg_stat_wal_receiver'dan detaylar al
+                                print(f"[DEBUG] pg_stat_wal_receiver sorgusu çalıştırılıyor...")
+                                receiver_details, error = sudo_exec("-u postgres psql -t -c \"SELECT pid, status, receive_start_lsn, received_lsn, last_msg_send_time, last_msg_receipt_time FROM pg_stat_wal_receiver;\"", timeout_sec=5)
+                                
+                                if receiver_details and not error:
+                                    details += f"\nReceiver Status:\n{receiver_details}"
+                                    print(f"[DEBUG] pg_stat_wal_receiver output alındı")
+                                else:
+                                    details += f"\nReceiver Status: Detay alınamadı (Error: {error})"
+                                    print(f"[DEBUG] pg_stat_wal_receiver hata: {error}")
+                                
+                                # WAL receiver process detayları
+                                stdin, stdout, stderr = ssh.exec_command("pgrep -fl 'wal receiver process'", timeout=3)
+                                receiver_processes = stdout.read().decode().strip()
+                                if receiver_processes:
+                                    details += f"\nWAL Receiver Process:\n{receiver_processes}"
+                            
+                            result['streaming_replication_details'] = details
+                            print(f"[DEBUG] Streaming replication bulundu: {result['streaming_replication_status']}")
+                        else:
+                            result['streaming_replication_status'] = 'Yok (Standalone)'
+                            result['streaming_replication_details'] = 'WAL sender/receiver process bulunamadı'
+                            print(f"[DEBUG] Streaming replication bulunamadı")
+                            
+                    except Exception as e:
+                        print(f"[DEBUG] Streaming replication check exception: {e}")
+                        result['streaming_replication_status'] = 'N/A'
+                        result['streaming_replication_details'] = 'N/A'
+                    
+                    # HA Tools Summary
+                    ha_summary = []
+                    if result.get('patroni_status') == 'Var':
+                        ha_summary.append('Patroni')
+                    if result.get('repmgr_status') == 'Var':
+                        ha_summary.append('Repmgr')
+                    if result.get('paf_status') == 'Var':
+                        ha_summary.append('PAF/Pacemaker')
+                    if result.get('citus_status') and 'Var' in result.get('citus_status'):
+                        ha_summary.append('Citus')
+                    if result.get('streaming_replication_status') and result.get('streaming_replication_status') != 'Yok (Standalone)':
+                        ha_summary.append(f"Streaming Replication ({result.get('streaming_replication_status')})")
+                    
+                    result['ha_tools_summary'] = ' | '.join(ha_summary) if ha_summary else 'HA aracı bulunamadı'
+                    
+                    # ============ DISK PERFORMANS TESTİ (sudo_exec tanımlandıktan sonra) ============
+                    if result['disk_type'] == 'PENDING':
+                        try:
+                            print(f"[DEBUG] Disk performans testi başlatılıyor...")
+                            
+                            # Önce disk tipini belirle (hızlı)
+                            stdin, stdout, stderr = ssh.exec_command("lsblk -d -n -o NAME,TYPE,ROTA | grep disk | head -1", timeout=3)
+                            disk_info = stdout.read().decode().strip()
+                            
+                            disk_type = 'N/A'
+                            if disk_info:
+                                parts = disk_info.split()
+                                if len(parts) >= 3:
+                                    rotation = parts[2]
+                                    disk_type = 'SSD' if rotation == '0' else 'HDD'
+                                print(f"[DEBUG] Disk info: {disk_info}, Type: {disk_type}")
+                            
+                            # Hızlı yazma/okuma testi (10MB - çok hızlı) - timeout 10 saniye
+                            # Yazma testi
+                            write_cmd = "dd if=/dev/zero of=/tmp/speedtest.tmp bs=1M count=10 oflag=direct 2>&1 | tail -1"
+                            write_output, write_error = sudo_exec(write_cmd, timeout_sec=10)
+                            
+                            write_speed = 'N/A'
+                            if write_output and not write_error:
+                                # dd çıktısından hızı parse et
+                                import re
+                                speed_match = re.search(r'(\d+\.?\d*)\s*(MB|GB)/s', write_output)
+                                if speed_match:
+                                    write_speed = f"{speed_match.group(1)} {speed_match.group(2)}/s"
+                            
+                            # Okuma testi - timeout 10 saniye
+                            read_cmd = "dd if=/tmp/speedtest.tmp of=/dev/null bs=1M 2>&1 | tail -1; rm -f /tmp/speedtest.tmp"
+                            read_output, read_error = sudo_exec(read_cmd, timeout_sec=10)
+                            
+                            read_speed = 'N/A'
+                            if read_output and not read_error:
+                                import re
+                                speed_match = re.search(r'(\d+\.?\d*)\s*(MB|GB)/s', read_output)
+                                if speed_match:
+                                    read_speed = f"{speed_match.group(1)} {speed_match.group(2)}/s"
+                            
+                            result['disk_type'] = disk_type
+                            result['disk_write_speed'] = write_speed
+                            result['disk_read_speed'] = read_speed
+                            result['disk_performance_test'] = f"Type: {disk_type}\nWrite: {write_output}\nRead: {read_output}"
+                            
+                            print(f"[DEBUG] Disk performans testi tamamlandı - Type: {disk_type}, Write: {write_speed}, Read: {read_speed}")
+                            
+                        except Exception as e:
+                            print(f"[DEBUG] Disk performans testi exception: {e}")
+                            import traceback
+                            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                            result['disk_type'] = 'N/A'
+                            result['disk_write_speed'] = 'N/A'
+                            result['disk_read_speed'] = 'N/A'
+                            result['disk_performance_test'] = f'Test yapılamadı: {str(e)}'
+                    
+                else:
+                    result['pg_connection_count'] = 'N/A'
+                    result['pg_max_connections'] = 'N/A'
+                    result['pg_databases'] = 'N/A'
+                    result['pg_total_size'] = 'N/A'
+                    result['pg_data_directory'] = 'N/A'
+                    result['pg_port'] = 'N/A'
+                    result['pg_shared_buffers'] = 'N/A'
+                    result['pg_work_mem'] = 'N/A'
+                    result['pg_effective_cache_size'] = 'N/A'
+                    result['pg_maintenance_work_mem'] = 'N/A'
+                    result['pg_wal_level'] = 'N/A'
+                    result['pg_archive_mode'] = 'N/A'
+                    result['pg_replication_slots'] = 'N/A'
+                    result['pg_uptime'] = 'N/A'
+                    
+                    # PostgreSQL yoksa HA araçları da yok demektir
+                    result['patroni_status'] = 'N/A'
+                    result['patroni_details'] = 'N/A'
+                    result['repmgr_status'] = 'N/A'
+                    result['repmgr_details'] = 'N/A'
+                    result['paf_status'] = 'N/A'
+                    result['paf_details'] = 'N/A'
+                    result['citus_status'] = 'N/A'
+                    result['citus_details'] = 'N/A'
+                    result['streaming_replication_status'] = 'N/A'
+                    result['streaming_replication_details'] = 'N/A'
+                    result['ha_tools_summary'] = 'N/A (PostgreSQL yok)'
+                
+                # SSH bağlantısını kapat
+                try:
+                    if ssh is not None:
+                        # Transport'u da kapat (daemon thread sorununu önler)
+                        transport = ssh.get_transport()
+                        if transport is not None:
+                            transport.close()
+                        ssh.close()
+                        print(f"[DEBUG] SSH bağlantısı kapatıldı: {result['hostname']}")
+                except Exception as e:
+                    print(f"[DEBUG] SSH kapatma hatası: {e}")
+                
+            except Exception as e:
+                result['status'] = 'error'
+                result['error_message'] = str(e)
+                print(f"[ERROR] Healthcheck exception for {result['hostname']}: {e}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                
+                # Hata durumunda SSH bağlantısını kapat
+                try:
+                    if ssh is not None:
+                        # Transport'u da kapat (daemon thread sorununu önler)
+                        transport = ssh.get_transport()
+                        if transport is not None:
+                            transport.close()
+                        ssh.close()
+                        print(f"[DEBUG] SSH bağlantısı kapatıldı (exception handler)")
+                except Exception as close_error:
+                    print(f"[DEBUG] SSH kapatma hatası (exception handler): {close_error}")
+                    pass
+                
+                # HA araçları için default değerler ekle (hata durumunda)
+                result.setdefault('patroni_status', 'N/A')
+                result.setdefault('patroni_details', 'N/A')
+                result.setdefault('repmgr_status', 'N/A')
+                result.setdefault('repmgr_details', 'N/A')
+                result.setdefault('paf_status', 'N/A')
+                result.setdefault('paf_details', 'N/A')
+                result.setdefault('citus_status', 'N/A')
+                result.setdefault('citus_details', 'N/A')
+                result.setdefault('streaming_replication_status', 'N/A')
+                result.setdefault('streaming_replication_details', 'N/A')
+                result.setdefault('ha_tools_summary', 'N/A (Hata)')
+            
+            # Sonucu kaydet - detaylı hata yakalama
+            try:
+                # INSERT öncesi debug
+                print(f"[DEBUG] Saving healthcheck result for {result['hostname']}")
+                
+                # Önce results'a ekle (database olmasa bile çalışsın)
+                results.append(result)
+                
+                # Database'e kaydet (hata varsa devam edelim)
+                db_execute("""
+                    INSERT INTO healthcheck_results 
+                    (server_id, hostname, ip, status, os_info, cpu_info, cpu_cores, 
+                     ram_total, ram_used, ram_free, disks, uptime, postgresql_status, 
+                     postgresql_version, postgresql_replication, pgbackrest_status, 
+                     network_info, load_average, error_message, checked_by, checked_by_username,
+                     system_update_status, system_update_message,
+                     pgbackrest_details, pg_probackup_status, pg_probackup_path,
+                     pgbarman_status, pgbarman_details, backup_info, pg_probackup_details,
+                     disk_type, disk_write_speed, disk_read_speed, disk_performance_test,
+                     kernel_version, architecture, last_boot, swap_memory, memory_detailed,
+                     top_cpu_processes, top_memory_processes, disk_io_stats, network_interfaces,
+                     dns_servers, timezone, running_services, total_connections,
+                     pg_connection_count, pg_max_connections, pg_databases, pg_total_size,
+                     pg_data_directory, pg_port, pg_shared_buffers, pg_work_mem,
+                     pg_effective_cache_size, pg_maintenance_work_mem, pg_wal_level,
+                     pg_archive_mode, pg_replication_slots, pg_uptime,
+                     failed_services, listening_ports,
+                     kernel_params, kernel_params_summary,
+                     patroni_status, patroni_details, repmgr_status, repmgr_details,
+                     paf_status, paf_details, citus_status, citus_details,
+                     streaming_replication_status, streaming_replication_details, ha_tools_summary)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    server_id,
+                    result['hostname'],
+                    result['ip'],
+                    result['status'],
+                    result.get('os_info', 'N/A'),
+                    result.get('cpu_info', 'N/A'),
+                    result.get('cpu_cores', 'N/A'),
+                    result.get('ram_total', 'N/A'),
+                    result.get('ram_used', 'N/A'),
+                    result.get('ram_free', 'N/A'),
+                    result.get('disks', '[]'),
+                    result.get('uptime', 'N/A'),
+                    result.get('postgresql_status', 'Yok'),
+                    result.get('postgresql_version', 'N/A'),
+                    result.get('postgresql_replication', 'N/A'),
+                    result.get('pgbackrest_status', 'Yok'),
+                    result.get('network_info', 'N/A'),
+                    result.get('load_average', 'N/A'),
+                    result.get('error_message', 'N/A'),
+                    session['user_id'],
+                    session['username'],
+                    result.get('system_update_status', 'N/A'),
+                    result.get('system_update_message', 'N/A'),
+                    result.get('pgbackrest_details', 'N/A'),
+                    result.get('pg_probackup_status', 'N/A'),
+                    result.get('pg_probackup_path', 'N/A'),
+                    result.get('pgbarman_status', 'N/A'),
+                    result.get('pgbarman_details', 'N/A'),
+                    result.get('backup_info', 'N/A'),
+                    result.get('pg_probackup_details', 'N/A'),
+                    result.get('disk_type', 'N/A'),
+                    result.get('disk_write_speed', 'N/A'),
+                    result.get('disk_read_speed', 'N/A'),
+                    result.get('disk_performance_test', 'N/A'),
+                    result.get('kernel_version', 'N/A'),
+                    result.get('architecture', 'N/A'),
+                    result.get('last_boot', 'N/A'),
+                    result.get('swap_memory', 'N/A'),
+                    result.get('memory_detailed', 'N/A'),
+                    result.get('top_cpu_processes', 'N/A'),
+                    result.get('top_memory_processes', 'N/A'),
+                    result.get('disk_io_stats', 'N/A'),
+                    result.get('network_interfaces', 'N/A'),
+                    result.get('dns_servers', 'N/A'),
+                    result.get('timezone', 'N/A'),
+                    result.get('running_services', 'N/A'),
+                    result.get('total_connections', 'N/A'),
+                    result.get('pg_connection_count', 'N/A'),
+                    result.get('pg_max_connections', 'N/A'),
+                    result.get('pg_databases', 'N/A'),
+                    result.get('pg_total_size', 'N/A'),
+                    result.get('pg_data_directory', 'N/A'),
+                    result.get('pg_port', 'N/A'),
+                    result.get('pg_shared_buffers', 'N/A'),
+                    result.get('pg_work_mem', 'N/A'),
+                    result.get('pg_effective_cache_size', 'N/A'),
+                    result.get('pg_maintenance_work_mem', 'N/A'),
+                    result.get('pg_wal_level', 'N/A'),
+                    result.get('pg_archive_mode', 'N/A'),
+                    result.get('pg_replication_slots', 'N/A'),
+                    result.get('pg_uptime', 'N/A'),
+                    result.get('failed_services', 'N/A'),
+                    result.get('listening_ports', 'N/A'),
+                    result.get('kernel_params', '{}'),
+                    result.get('kernel_params_summary', 'N/A'),
+                    result.get('patroni_status', 'N/A'),
+                    result.get('patroni_details', 'N/A'),
+                    result.get('repmgr_status', 'N/A'),
+                    result.get('repmgr_details', 'N/A'),
+                    result.get('paf_status', 'N/A'),
+                    result.get('paf_details', 'N/A'),
+                    result.get('citus_status', 'N/A'),
+                    result.get('citus_details', 'N/A'),
+                    result.get('streaming_replication_status', 'N/A'),
+                    result.get('streaming_replication_details', 'N/A'),
+                    result.get('ha_tools_summary', 'N/A'),
+                ))
+                print(f"[DEBUG] Healthcheck sonucu başarıyla kaydedildi")
+            except Exception as e:
+                print(f"[ERROR] Healthcheck sonucu kaydedilemedi: {e}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                # Database'e kayıt başarısız ama sonuç yine de döndürülsün
+        
+        # Activity log
+        log_activity(session['user_id'], session['username'], 'healthcheck_run', 
+                    f"{len(server_ids)} sunucu için healthcheck çalıştırıldı", 'healthcheck')
+        
+        print(f"[DEBUG] Healthcheck tamamlandı. {len(results)} sonuç dönülüyor.")
+        print(f"[DEBUG] ========== API HEALTHCHECK BİTTİ ==========")
+        
+        return jsonify({'success': True, 'results': results})
+        
+    except Exception as e:
+        print(f"[ERROR] ========== API HEALTHCHECK HATASI ==========")
+        print(f"[ERROR] Exception type: {type(e).__name__}")
+        print(f"[ERROR] Exception message: {str(e)}")
+        import traceback
+        print(f"[ERROR] Full traceback:")
+        print(traceback.format_exc())
+        print(f"[ERROR] ==========================================")
+        return jsonify({'success': False, 'message': f'{type(e).__name__}: {str(e)}'}), 500
 
 # Manuel sunucu ekleme sayfası
 @app.route("/manuel-sunucu-ekle", methods=["GET", "POST"])
@@ -6982,5 +10080,6 @@ def test_server_connection():
 if __name__ == "__main__":
     init_db()
     init_sunucu_envanteri_table()
+    init_healthcheck_table()
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
