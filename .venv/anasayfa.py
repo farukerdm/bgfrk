@@ -251,7 +251,7 @@ def init_db() -> None:
         admin_id = cur.lastrowid
         
         # Admin'e tüm sayfalara erişim ver
-        pages = ['multiquery', 'pg_install', 'admin_panel', 'faydali_linkler', 'view_logs', 'envanter']
+        pages = ['multiquery', 'pg_install', 'admin_panel', 'faydali_linkler', 'view_logs', 'envanter', 'healthcheck']
         for page in pages:
             con.execute("""
                 INSERT INTO user_permissions (user_id, page_name, can_access) 
@@ -259,6 +259,26 @@ def init_db() -> None:
             """, [admin_id, page])
         
         con.commit()
+    
+    # Mevcut admin kullanıcısına healthcheck yetkisi ekle (migration)
+    try:
+        admin_users = con.execute("SELECT id FROM users WHERE is_admin = 1").fetchall()
+        for admin_user in admin_users:
+            admin_id = admin_user[0]
+            # Healthcheck yetkisi var mı kontrol et
+            existing_perm = con.execute("""
+                SELECT id FROM user_permissions 
+                WHERE user_id = ? AND page_name = 'healthcheck'
+            """, [admin_id]).fetchone()
+            
+            if not existing_perm:
+                con.execute("""
+                    INSERT INTO user_permissions (user_id, page_name, can_access)
+                    VALUES (?, 'healthcheck', 1)
+                """, [admin_id])
+        con.commit()
+    except:
+        pass  # Hata olursa devam et
 
 def db_query(sql: str, args: Tuple = ()) -> List[Dict[str, Any]]:
     try:
@@ -447,6 +467,7 @@ def init_healthcheck_table():
             ('streaming_replication_status', 'TEXT'),
             ('streaming_replication_details', 'TEXT'),
             ('ha_tools_summary', 'TEXT'),
+            ('cpu_details', 'TEXT'),
         ]
         
         for col_name, col_type in migration_columns:
@@ -916,23 +937,62 @@ def collect_server_info(hostname, ip, ssh_port, ssh_user, password):
         except:
             pass
         
-        # CPU bilgisi
+        # CPU bilgisi, cores ve sockets - Geliştirilmiş
         try:
+            # CPU model bilgisini al
             stdin, stdout, stderr = ssh.exec_command("cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d':' -f2 | xargs")
-            cpu_info = stdout.read().decode().strip()
-            if cpu_info:
-                server_info['cpu_info'] = cpu_info
-        except:
-            pass
-        
-        # CPU core sayısı
-        try:
+            cpu_model = stdout.read().decode().strip()
+            
+            # Toplam core sayısını al (logical cores)
             stdin, stdout, stderr = ssh.exec_command("nproc")
-            cpu_cores = stdout.read().decode().strip()
-            if cpu_cores:
-                server_info['cpu_cores'] = f"{cpu_cores} cores"
+            total_cores = stdout.read().decode().strip()
+            
+            # Physical core sayısını al
+            stdin, stdout, stderr = ssh.exec_command("grep 'cpu cores' /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs")
+            physical_cores = stdout.read().decode().strip()
+            
+            # Socket sayısını al (fiziksel CPU sayısı)
+            stdin, stdout, stderr = ssh.exec_command("grep 'physical id' /proc/cpuinfo | sort -u | wc -l")
+            sockets = stdout.read().decode().strip()
+            
+            # Hyperthreading kontrolü
+            hyperthreading = "Yes" if (total_cores and physical_cores and int(total_cores) > int(physical_cores)) else "No"
+            
+            # CPU bilgisini birleştir
+            if cpu_model and total_cores:
+                server_info['cpu_info'] = f"{cpu_model} ({total_cores} cores)"
+                server_info['cpu_cores'] = f"{total_cores} cores"
+                
+                # Socket ve core detaylarını hazırla
+                cpu_details = []
+                if sockets and int(sockets) > 0:
+                    cpu_details.append(f"{sockets} socket(s)")
+                if physical_cores and total_cores:
+                    if int(physical_cores) < int(total_cores):
+                        cpu_details.append(f"{physical_cores} physical cores")
+                        cpu_details.append(f"{total_cores} logical cores")
+                    else:
+                        cpu_details.append(f"{total_cores} cores")
+                if hyperthreading == "Yes":
+                    cpu_details.append("HT enabled")
+                
+                server_info['cpu_details'] = " | ".join(cpu_details) if cpu_details else f"{total_cores} cores"
+            elif cpu_model:
+                server_info['cpu_info'] = cpu_model
+                server_info['cpu_cores'] = 'N/A'
+                server_info['cpu_details'] = 'N/A'
+            elif total_cores:
+                server_info['cpu_info'] = f"CPU ({total_cores} cores)"
+                server_info['cpu_cores'] = f"{total_cores} cores"
+                server_info['cpu_details'] = f"{total_cores} cores"
+            else:
+                server_info['cpu_info'] = 'N/A'
+                server_info['cpu_cores'] = 'N/A'
+                server_info['cpu_details'] = 'N/A'
         except:
-            pass
+            server_info['cpu_info'] = 'N/A'
+            server_info['cpu_cores'] = 'N/A'
+            server_info['cpu_details'] = 'N/A'
         
         # RAM bilgisi
         try:
@@ -1807,71 +1867,232 @@ TEMPLATE_ADMIN = """
     
     <!-- Dashboard -->
     <div id="dashboard-tab" class="tab-content {% if active_tab == 'dashboard' %}active{% endif %}">
-      <!-- İstatistik Kartları -->
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
+      <!-- İstatistik Kartları - İlk Satır -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; margin-bottom: 2rem;">
         <!-- Sunucu Sayısı -->
-        <div class="stat-card clickable-stat" onclick="showServersModal()">
-          <div class="stat-icon">🖥️</div>
+        <div class="stat-card clickable-stat" onclick="showServersModal()" style="background: linear-gradient(135deg, #3b82f6, #2563eb);">
+          <div class="stat-icon" style="font-size: 2.5rem;">🖥️</div>
           <div class="stat-content">
-            <div class="stat-number" id="adminServers">0</div>
-            <div class="stat-label">Kayıtlı Sunucu</div>
+            <div class="stat-number" id="adminServers" style="color: white; font-size: 2.5rem;">0</div>
+            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Kayıtlı Sunucu</div>
+            <div style="color: rgba(255,255,255,0.7); font-size: 0.85rem; margin-top: 0.5rem;">
+              <span id="pgServersCount">0</span> PostgreSQL aktif
+            </div>
           </div>
         </div>
         
         <!-- Toplam Kullanıcı -->
-        <div class="stat-card clickable-stat" onclick="showUsersModal()">
-          <div class="stat-icon">👥</div>
+        <div class="stat-card clickable-stat" onclick="showUsersModal()" style="background: linear-gradient(135deg, #10b981, #059669);">
+          <div class="stat-icon" style="font-size: 2.5rem;">👥</div>
           <div class="stat-content">
-            <div class="stat-number" id="adminUsers">0</div>
-            <div class="stat-label">Aktif Kullanıcı</div>
+            <div class="stat-number" id="adminUsers" style="color: white; font-size: 2.5rem;">0</div>
+            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Toplam Kullanıcı</div>
+            <div style="color: rgba(255,255,255,0.7); font-size: 0.85rem; margin-top: 0.5rem;">
+              <span id="activeUsersCount">0</span> aktif
+            </div>
           </div>
         </div>
         
         <!-- Bugünkü Sorgular -->
-        <div class="stat-card clickable-stat" onclick="showQueriesModal()">
-          <div class="stat-icon">📊</div>
+        <div class="stat-card clickable-stat" onclick="showQueriesModal()" style="background: linear-gradient(135deg, #8b5cf6, #7c3aed);">
+          <div class="stat-icon" style="font-size: 2.5rem;">📊</div>
           <div class="stat-content">
-            <div class="stat-number" id="adminTodayQueries">0</div>
-            <div class="stat-label">Bugünkü Sorgular</div>
+            <div class="stat-number" id="adminTodayQueries" style="color: white; font-size: 2.5rem;">0</div>
+            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Bugünkü Sorgular</div>
+            <div style="color: rgba(255,255,255,0.7); font-size: 0.85rem; margin-top: 0.5rem;">
+              <span id="weeklyQueries">0</span> bu hafta
+            </div>
           </div>
         </div>
         
-        <!-- Sistem Durumu -->
-        <div class="stat-card">
-          <div class="stat-icon">✅</div>
+        <!-- Healthcheck Sayısı -->
+        <div class="stat-card" style="background: linear-gradient(135deg, #f59e0b, #d97706);">
+          <div class="stat-icon" style="font-size: 2.5rem;">🏥</div>
           <div class="stat-content">
-            <div class="stat-number" style="color: #10b981;">Online</div>
-            <div class="stat-label">Sistem Durumu</div>
+            <div class="stat-number" id="totalHealthchecks" style="color: white; font-size: 2.5rem;">0</div>
+            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Toplam Healthcheck</div>
+            <div style="color: rgba(255,255,255,0.7); font-size: 0.85rem; margin-top: 0.5rem;">
+              <span id="todayHealthchecks">0</span> bugün
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- İkinci Satır: Detaylı Bilgiler -->
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; margin-bottom: 2rem;">
+        <!-- Son Aktiviteler -->
+        <div class="card" style="max-height: 500px;">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">📋</span> Son Aktiviteler
+          </h3>
+          <div id="recentActivities" style="max-height: 400px; overflow-y: auto;">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- Sistem Sağlık Durumu -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">💊</span> Sistem Sağlığı
+          </h3>
+          <div id="systemHealth" style="display: flex; flex-direction: column; gap: 1rem;">
+            <!-- Database Durumu -->
+            <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #10b981;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: 600; color: var(--txt);">💾 Database</div>
+                  <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem;">SQLite</div>
+                </div>
+                <div style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; font-size: 0.9rem;">
+                  ✓ Çalışıyor
+                </div>
+              </div>
+            </div>
+            
+            <!-- API Durumu -->
+            <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #3b82f6;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: 600; color: var(--txt);">🌐 API</div>
+                  <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem;">Flask Backend</div>
+                </div>
+                <div style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; font-size: 0.9rem;">
+                  ✓ Aktif
+                </div>
+              </div>
+            </div>
+            
+            <!-- Başarısız Healthcheck -->
+            <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #f59e0b;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: 600; color: var(--txt);">⚠️ Hatalı HC</div>
+                  <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem;">Son 24 saat</div>
+                </div>
+                <div id="failedHealthchecks" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; font-size: 0.9rem;">
+                  0
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- İkinci Satır B: Kritik Uyarılar -->
+      <div style="margin-bottom: 2rem;">
+        <div class="card" id="criticalAlertsCard" style="border-left: 4px solid #ef4444; display: none;">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; color: #ef4444;">
+            <span style="font-size: 1.5rem;">⚠️</span> Kritik Uyarılar
+          </h3>
+          <div id="criticalAlerts"></div>
+        </div>
+      </div>
+      
+      <!-- Üçüncü Satır: Haftalık İstatistikler ve Aktivite Grafiği -->
+      <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 1.5rem; margin-bottom: 2rem;">
+        <!-- Haftalık Özet -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">📈</span> Haftalık Özet
+          </h3>
+          <div id="weeklyStats" style="display: flex; flex-direction: column; gap: 1rem;">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- Aktivite Grafiği -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between;">
+            <span style="display: flex; align-items: center; gap: 0.5rem;">
+              <span style="font-size: 1.5rem;">📊</span> Son 7 Günün Aktivitesi
+            </span>
+            <span id="liveTime" style="font-size: 0.9rem; color: var(--muted); font-weight: 500;">--:--:--</span>
+          </h3>
+          <canvas id="activityChart" width="400" height="200"></canvas>
+        </div>
+      </div>
+      
+      <!-- Dördüncü Satır: PostgreSQL Sunucu Durumları ve En Aktif Kullanıcılar -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem;">
+        <!-- PostgreSQL Sunucular -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">🐘</span> PostgreSQL Sunucular
+          </h3>
+          <div id="postgresqlServers">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- En Aktif Kullanıcılar -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">🏆</span> En Aktif Kullanıcılar (7 gün)
+          </h3>
+          <div id="topUsers">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Beşinci Satır: Database Metrikleri ve Son Girişler -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem;">
+        <!-- Database Metrikleri -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">💾</span> Database Metrikleri
+          </h3>
+          <div id="databaseMetrics">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
+          </div>
+        </div>
+        
+        <!-- Son Girişler -->
+        <div class="card">
+          <h3 style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span style="font-size: 1.5rem;">🔑</span> Son Girişler
+          </h3>
+          <div id="recentLogins">
+            <p style="color: var(--muted); text-align: center; padding: 2rem;">Yükleniyor...</p>
           </div>
         </div>
       </div>
       
       <!-- Hızlı Erişim Kartları -->
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
-        <div class="quick-access-card">
-          <div class="quick-access-icon">🔍</div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem;">
+        <div class="quick-access-card" style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.05));">
+          <div class="quick-access-icon" style="background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 1rem; font-size: 1.8rem;">🔍</div>
           <div class="quick-access-content">
-            <h4>Multiquery</h4>
-            <p>Birden fazla PostgreSQL sunucusunda eşzamanlı sorgu çalıştırın</p>
-            <a href="/multiquery" class="quick-access-btn">Aç</a>
+            <h4 style="color: var(--txt); font-size: 1.3rem; margin-bottom: 0.5rem;">Multiquery</h4>
+            <p style="color: var(--muted); font-size: 0.95rem; margin-bottom: 1rem;">Birden fazla PostgreSQL sunucusunda eşzamanlı sorgu çalıştırın</p>
+            <a href="/multiquery" class="quick-access-btn" style="background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; padding: 0.75rem 1.5rem; border-radius: 0.75rem; text-decoration: none; display: inline-block; font-weight: 600; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);">Aç →</a>
           </div>
         </div>
         
-        <div class="quick-access-card">
-          <div class="quick-access-icon">⚙️</div>
+        <div class="quick-access-card" style="background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(139, 92, 246, 0.05));">
+          <div class="quick-access-icon" style="background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 1rem; font-size: 1.8rem;">⚙️</div>
           <div class="quick-access-content">
-            <h4>PostgreSQL Installation</h4>
-            <p>Otomatik PostgreSQL kurulum ve yapılandırma</p>
-            <a href="/pg_install" class="quick-access-btn">Aç</a>
+            <h4 style="color: var(--txt); font-size: 1.3rem; margin-bottom: 0.5rem;">PostgreSQL Installation</h4>
+            <p style="color: var(--muted); font-size: 0.95rem; margin-bottom: 1rem;">Otomatik PostgreSQL kurulum ve yapılandırma</p>
+            <a href="/pg_install" class="quick-access-btn" style="background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; padding: 0.75rem 1.5rem; border-radius: 0.75rem; text-decoration: none; display: inline-block; font-weight: 600; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);">Aç →</a>
           </div>
         </div>
         
-        <div class="quick-access-card">
-          <div class="quick-access-icon">👨‍💼</div>
+        <div class="quick-access-card" style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.05));">
+          <div class="quick-access-icon" style="background: linear-gradient(135deg, #10b981, #059669); color: white; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 1rem; font-size: 1.8rem;">🏥</div>
           <div class="quick-access-content">
-            <h4>Admin Panel</h4>
-            <p>Kullanıcı yönetimi ve sistem ayarları</p>
-            <a href="/admin" class="quick-access-btn">Aç</a>
+            <h4 style="color: var(--txt); font-size: 1.3rem; margin-bottom: 0.5rem;">Healthcheck</h4>
+            <p style="color: var(--muted); font-size: 0.95rem; margin-bottom: 1rem;">Sunucu sağlık kontrolü ve performans analizi</p>
+            <a href="/healthcheck" class="quick-access-btn" style="background: linear-gradient(135deg, #10b981, #059669); color: white; padding: 0.75rem 1.5rem; border-radius: 0.75rem; text-decoration: none; display: inline-block; font-weight: 600; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);">Aç →</a>
+          </div>
+        </div>
+        
+        <div class="quick-access-card" style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(245, 158, 11, 0.05));">
+          <div class="quick-access-icon" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; border-radius: 1rem; font-size: 1.8rem;">📋</div>
+          <div class="quick-access-content">
+            <h4 style="color: var(--txt); font-size: 1.3rem; margin-bottom: 0.5rem;">Sunucu Envanteri</h4>
+            <p style="color: var(--muted); font-size: 0.95rem; margin-bottom: 1rem;">Sunucu listesi ve sistem bilgileri</p>
+            <a href="/envanter" class="quick-access-btn" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; padding: 0.75rem 1.5rem; border-radius: 0.75rem; text-decoration: none; display: inline-block; font-weight: 600; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);">Aç →</a>
           </div>
         </div>
       </div>
@@ -1919,6 +2140,10 @@ TEMPLATE_ADMIN = """
               <div class="checkbox-item">
                 <input type="checkbox" name="envanter" id="perm_envanter">
                 <label for="perm_envanter">Sunucu Envanteri</label>
+              </div>
+              <div class="checkbox-item">
+                <input type="checkbox" name="healthcheck" id="perm_healthcheck">
+                <label for="perm_healthcheck">Healthcheck</label>
               </div>
               {% if session.get('is_admin') %}
               <div class="checkbox-item">
@@ -2201,16 +2426,441 @@ TEMPLATE_ADMIN = """
     // Admin Dashboard için istatistikleri yükle
     async function loadAdminStats() {
       try {
-        const response = await fetch('/api/stats');
+        const response = await fetch('/api/admin/dashboard-stats');
         const stats = await response.json();
         
-        document.getElementById('adminServers').textContent = stats.servers || 0;
-        document.getElementById('adminUsers').textContent = stats.users || 0;
+        // Üst istatistikler
+        document.getElementById('adminServers').textContent = stats.totalServers || 0;
+        document.getElementById('pgServersCount').textContent = stats.pgServers || 0;
+        document.getElementById('adminUsers').textContent = stats.totalUsers || 0;
+        document.getElementById('activeUsersCount').textContent = stats.activeUsers || 0;
         document.getElementById('adminTodayQueries').textContent = stats.todayQueries || 0;
+        document.getElementById('weeklyQueries').textContent = stats.weeklyQueries || 0;
+        document.getElementById('totalHealthchecks').textContent = stats.totalHealthchecks || 0;
+        document.getElementById('todayHealthchecks').textContent = stats.todayHealthchecks || 0;
+        document.getElementById('failedHealthchecks').textContent = stats.failedHealthchecks || 0;
+        
+        // Son aktiviteleri yükle
+        loadRecentActivities(stats.recentActivities || []);
+        
+        // PostgreSQL sunucuları yükle
+        loadPostgreSQLServers(stats.postgresqlServers || []);
+        
+        // En aktif kullanıcıları yükle
+        loadTopUsers(stats.topUsers || []);
+        
+        // Kritik uyarıları yükle
+        loadCriticalAlerts(stats.criticalAlerts || []);
+        
+        // Haftalık özet yükle
+        loadWeeklyStats(stats.weeklyComparison || {});
+        
+        // Aktivite grafiği çiz
+        drawActivityChart(stats.dailyActivities || []);
+        
+        // Database metrikleri yükle
+        loadDatabaseMetrics(stats.databaseMetrics || {});
+        
+        // Son girişleri yükle
+        loadRecentLogins(stats.recentLogins || []);
+        
       } catch (error) {
         console.log('Admin istatistikleri yüklenemedi:', error);
       }
     }
+    
+    // Son aktiviteleri göster
+    function loadRecentActivities(activities) {
+      const container = document.getElementById('recentActivities');
+      if (!activities || activities.length === 0) {
+        container.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 2rem;">Henüz aktivite yok</p>';
+        return;
+      }
+      
+      let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+      activities.forEach(activity => {
+        const actionColor = activity.action.includes('Giriş') ? '#10b981' : 
+                           activity.action.includes('Çıkış') ? '#6b7280' :
+                           activity.action.includes('Sil') ? '#ef4444' :
+                           activity.action.includes('Ekle') ? '#f59e0b' : '#3b82f6';
+        
+        html += `
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid ${actionColor};">
+            <div style="display: flex; justify-content: space-between; align-items: start;">
+              <div style="flex: 1;">
+                <div style="font-weight: 600; color: var(--txt); margin-bottom: 0.25rem;">
+                  ${activity.username}
+                </div>
+                <div style="font-size: 0.9rem; color: var(--muted); margin-bottom: 0.25rem;">
+                  ${activity.action}
+                </div>
+                <div style="font-size: 0.85rem; color: var(--muted);">
+                  📍 ${activity.page_name || 'N/A'} • 🕒 ${activity.timestamp}
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += '</div>';
+      container.innerHTML = html;
+    }
+    
+    // PostgreSQL sunucuları göster
+    function loadPostgreSQLServers(servers) {
+      const container = document.getElementById('postgresqlServers');
+      if (!servers || servers.length === 0) {
+        container.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 2rem;">PostgreSQL sunucusu bulunamadı</p>';
+        return;
+      }
+      
+      let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+      servers.slice(0, 5).forEach(server => {
+        const statusColor = server.postgresql_status === 'Var' ? '#10b981' : '#6b7280';
+        html += `
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid ${statusColor};">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-weight: 600; color: var(--txt);">${server.hostname}</div>
+                <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem;">
+                  ${server.ip} ${server.postgresql_version ? '• ' + server.postgresql_version : ''}
+                </div>
+              </div>
+              <div style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.85rem; font-weight: 600;">
+                ✓
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += '</div>';
+      
+      if (servers.length > 5) {
+        html += `<div style="text-align: center; margin-top: 1rem; padding: 0.75rem; color: var(--muted); font-size: 0.9rem;">
+          ve ${servers.length - 5} sunucu daha...
+        </div>`;
+      }
+      
+      container.innerHTML = html;
+    }
+    
+    // En aktif kullanıcıları göster
+    function loadTopUsers(users) {
+      const container = document.getElementById('topUsers');
+      if (!users || users.length === 0) {
+        container.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 2rem;">Veri yok</p>';
+        return;
+      }
+      
+      let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+      users.forEach((user, index) => {
+        const medalColors = ['#fbbf24', '#94a3b8', '#c2410c'];
+        const medals = ['🥇', '🥈', '🥉'];
+        const medal = index < 3 ? medals[index] : '👤';
+        const borderColor = index < 3 ? medalColors[index] : '#6b7280';
+        
+        html += `
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid ${borderColor};">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="font-size: 1.5rem;">${medal}</div>
+                <div>
+                  <div style="font-weight: 600; color: var(--txt);">${user.username}</div>
+                  <div style="font-size: 0.85rem; color: var(--muted);">${user.full_name}</div>
+                </div>
+              </div>
+              <div style="background: rgba(59, 130, 246, 0.2); color: #3b82f6; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.85rem; font-weight: 600;">
+                ${user.activity_count} işlem
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += '</div>';
+      container.innerHTML = html;
+    }
+    
+    // Kritik uyarıları göster
+    function loadCriticalAlerts(alerts) {
+      const container = document.getElementById('criticalAlerts');
+      const card = document.getElementById('criticalAlertsCard');
+      
+      if (!alerts || alerts.length === 0) {
+        card.style.display = 'none';
+        return;
+      }
+      
+      card.style.display = 'block';
+      let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+      
+      alerts.forEach(alert => {
+        const severity = alert.severity || 'warning';
+        const colors = {
+          critical: { bg: 'rgba(239, 68, 68, 0.1)', border: '#ef4444', text: '#ef4444', icon: '🔴' },
+          warning: { bg: 'rgba(245, 158, 11, 0.1)', border: '#f59e0b', text: '#f59e0b', icon: '🟡' },
+          info: { bg: 'rgba(59, 130, 246, 0.1)', border: '#3b82f6', text: '#3b82f6', icon: '🔵' }
+        };
+        const color = colors[severity] || colors.warning;
+        
+        html += `
+          <div style="background: ${color.bg}; padding: 1rem; border-radius: 0.75rem; border-left: 4px solid ${color.border}; border: 1px solid ${color.border};">
+            <div style="display: flex; align-items: start; gap: 0.75rem;">
+              <div style="font-size: 1.5rem;">${color.icon}</div>
+              <div style="flex: 1;">
+                <div style="font-weight: 600; color: ${color.text}; margin-bottom: 0.25rem;">${alert.title}</div>
+                <div style="font-size: 0.9rem; color: var(--txt);">${alert.message}</div>
+                ${alert.action ? `<div style="margin-top: 0.5rem;"><a href="${alert.action}" style="color: ${color.text}; font-size: 0.85rem; text-decoration: underline;">Detay →</a></div>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      
+      html += '</div>';
+      container.innerHTML = html;
+    }
+    
+    // Haftalık istatistikleri göster
+    function loadWeeklyStats(comparison) {
+      const container = document.getElementById('weeklyStats');
+      
+      const stats = [
+        { label: 'Toplam Sorgu', value: comparison.weeklyQueries || 0, change: comparison.queryChange || 0, icon: '📊' },
+        { label: 'Healthcheck', value: comparison.weeklyHealthchecks || 0, change: comparison.healthcheckChange || 0, icon: '🏥' },
+        { label: 'Kullanıcı Girişi', value: comparison.weeklyLogins || 0, change: comparison.loginChange || 0, icon: '🔑' },
+        { label: 'Sunucu Eklendi', value: comparison.serversAdded || 0, change: 0, icon: '🖥️' }
+      ];
+      
+      let html = '';
+      stats.forEach(stat => {
+        const isPositive = stat.change > 0;
+        const changeColor = isPositive ? '#10b981' : stat.change < 0 ? '#ef4444' : '#6b7280';
+        const changeIcon = isPositive ? '📈' : stat.change < 0 ? '📉' : '➖';
+        
+        html += `
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #3b82f6;">
+            <div style="display: flex; justify-content: space-between; align-items: start;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="font-size: 1.8rem;">${stat.icon}</div>
+                <div>
+                  <div style="font-size: 1.5rem; font-weight: 700; color: var(--txt);">${stat.value}</div>
+                  <div style="font-size: 0.85rem; color: var(--muted);">${stat.label}</div>
+                </div>
+              </div>
+              ${stat.change !== 0 ? `
+                <div style="background: ${changeColor}20; color: ${changeColor}; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.85rem; font-weight: 600;">
+                  ${changeIcon} ${Math.abs(stat.change)}%
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      });
+      
+      container.innerHTML = html;
+    }
+    
+    // Aktivite grafiği çiz (basit canvas chart)
+    function drawActivityChart(dailyData) {
+      const canvas = document.getElementById('activityChart');
+      if (!canvas) return;
+      
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width;
+      const height = canvas.height;
+      const padding = 40;
+      
+      // Canvas temizle
+      ctx.clearRect(0, 0, width, height);
+      
+      if (!dailyData || dailyData.length === 0) {
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted');
+        ctx.font = '14px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('Veri bulunamadı', width / 2, height / 2);
+        return;
+      }
+      
+      // Değerleri al
+      const values = dailyData.map(d => d.count);
+      const labels = dailyData.map(d => d.day);
+      const maxValue = Math.max(...values, 1);
+      
+      // Arka plan grid çizgileri
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border');
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = padding + (height - 2 * padding) * i / 4;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(width - padding, y);
+        ctx.stroke();
+      }
+      
+      // Grafik çiz
+      ctx.beginPath();
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      
+      const stepX = (width - 2 * padding) / (values.length - 1);
+      
+      values.forEach((value, index) => {
+        const x = padding + index * stepX;
+        const y = height - padding - ((value / maxValue) * (height - 2 * padding));
+        
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      
+      // Noktalar ve gradient dolgu
+      const gradient = ctx.createLinearGradient(0, padding, 0, height - padding);
+      gradient.addColorStop(0, 'rgba(59, 130, 246, 0.3)');
+      gradient.addColorStop(1, 'rgba(59, 130, 246, 0.05)');
+      
+      ctx.lineTo(width - padding, height - padding);
+      ctx.lineTo(padding, height - padding);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+      
+      // Noktalar ekle
+      values.forEach((value, index) => {
+        const x = padding + index * stepX;
+        const y = height - padding - ((value / maxValue) * (height - 2 * padding));
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#3b82f6';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Değer etiketi
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--txt');
+        ctx.font = 'bold 12px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(value, x, y - 15);
+      });
+      
+      // X ekseni etiketleri
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted');
+      ctx.font = '11px system-ui';
+      ctx.textAlign = 'center';
+      labels.forEach((label, index) => {
+        const x = padding + index * stepX;
+        ctx.fillText(label, x, height - 10);
+      });
+    }
+    
+    // Database metriklerini göster
+    function loadDatabaseMetrics(metrics) {
+      const container = document.getElementById('databaseMetrics');
+      
+      html = `
+        <div style="display: flex; flex-direction: column; gap: 1rem;">
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #3b82f6;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-size: 0.85rem; color: var(--muted);">SQLite Dosya Boyutu</div>
+                <div style="font-weight: 700; color: var(--txt); font-size: 1.3rem; margin-top: 0.25rem;">${metrics.dbSize || 'N/A'}</div>
+              </div>
+              <div style="font-size: 2rem;">💾</div>
+            </div>
+          </div>
+          
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #10b981;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-size: 0.85rem; color: var(--muted);">Toplam Kayıt</div>
+                <div style="font-weight: 700; color: var(--txt); font-size: 1.3rem; margin-top: 0.25rem;">${metrics.totalRecords || 0}</div>
+              </div>
+              <div style="font-size: 2rem;">📝</div>
+            </div>
+          </div>
+          
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #f59e0b;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-size: 0.85rem; color: var(--muted);">Healthcheck Başarı Oranı</div>
+                <div style="font-weight: 700; color: var(--txt); font-size: 1.3rem; margin-top: 0.25rem;">${metrics.healthcheckSuccessRate || '0'}%</div>
+              </div>
+              <div style="font-size: 2rem;">✅</div>
+            </div>
+            <div style="margin-top: 0.75rem; background: var(--panel); height: 8px; border-radius: 4px; overflow: hidden;">
+              <div style="background: linear-gradient(90deg, #10b981, #059669); height: 100%; width: ${metrics.healthcheckSuccessRate || 0}%; transition: width 0.5s ease;"></div>
+            </div>
+          </div>
+          
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #8b5cf6;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <div style="font-size: 0.85rem; color: var(--muted);">Sistem Uptime</div>
+                <div style="font-weight: 700; color: var(--txt); font-size: 1.3rem; margin-top: 0.25rem;">${metrics.systemUptime || 'N/A'}</div>
+              </div>
+              <div style="font-size: 2rem;">⏱️</div>
+            </div>
+          </div>
+        </div>
+      `;
+      
+      container.innerHTML = html;
+    }
+    
+    // Son girişleri göster
+    function loadRecentLogins(logins) {
+      const container = document.getElementById('recentLogins');
+      if (!logins || logins.length === 0) {
+        container.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 2rem;">Henüz giriş yapılmamış</p>';
+        return;
+      }
+      
+      let html = '<div style="display: flex; flex-direction: column; gap: 0.75rem;">';
+      logins.forEach((login, index) => {
+        html += `
+          <div style="background: var(--hover); padding: 1rem; border-radius: 0.75rem; border-left: 4px solid #10b981;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="background: linear-gradient(135deg, #10b981, #059669); color: white; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1rem;">
+                  ${login.username.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <div style="font-weight: 600; color: var(--txt);">${login.username}</div>
+                  <div style="font-size: 0.85rem; color: var(--muted);">${login.full_name}</div>
+                </div>
+              </div>
+              <div style="text-align: right;">
+                <div style="font-size: 0.85rem; color: var(--muted);">🕒 ${login.timestamp}</div>
+                <div style="font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem;">📍 ${login.ip_address || 'N/A'}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += '</div>';
+      container.innerHTML = html;
+    }
+    
+    // Canlı saat
+    function updateLiveTime() {
+      const timeElement = document.getElementById('liveTime');
+      if (!timeElement) return;
+      
+      const now = new Date();
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      const seconds = String(now.getSeconds()).padStart(2, '0');
+      timeElement.textContent = `${hours}:${minutes}:${seconds}`;
+    }
+    
+    // Her saniye saati güncelle
+    setInterval(updateLiveTime, 1000);
+    updateLiveTime();
 
     // Dashboard sekmesi aktif olduğunda istatistikleri yükle
     function showTab(tabName) {
@@ -2227,6 +2877,14 @@ TEMPLATE_ADMIN = """
         loadAdminStats();
       }
     }
+    
+    // Sayfa yüklendiğinde dashboard aktifse verileri yükle
+    document.addEventListener('DOMContentLoaded', function() {
+      const dashboardTab = document.getElementById('dashboard-tab');
+      if (dashboardTab && dashboardTab.classList.contains('active')) {
+        loadAdminStats();
+      }
+    });
 
     // Modal fonksiyonları
     function showModal(modalId) {
@@ -4041,7 +4699,6 @@ TEMPLATE_TOPLU_SUNUCU_EKLE = r"""
                   <th>IP</th>
                   <th>OS</th>
                   <th>CPU</th>
-                  <th>Cores</th>
                   <th>RAM</th>
                   <th>Disk</th>
                   <th>Uptime</th>
@@ -4058,7 +4715,6 @@ TEMPLATE_TOPLU_SUNUCU_EKLE = r"""
                   <td>{{ result.ip }}</td>
                   <td>{{ result.os_info }}</td>
                   <td>{{ result.cpu_info }}</td>
-                  <td>{{ result.cpu_cores }}</td>
                   <td>{{ result.ram_total }}</td>
                   <td>
                     {% if result.disks is string %}
@@ -5034,13 +5690,28 @@ TEMPLATE_HEALTHCHECK = r"""
       <div class="row mt-4">
         <div class="col-md-12">
           <div class="card">
-            <h3>📊 Healthcheck Geçmişi</h3>
-            <p class="text-muted mb-3">Son healthcheck sonuçları</p>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+              <div>
+                <h3 style="margin: 0;">📊 Healthcheck Geçmişi</h3>
+                <p class="text-muted mb-0" style="font-size: 0.9rem; margin-top: 0.25rem;">Son healthcheck sonuçları</p>
+              </div>
+              {% if history %}
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <button class="btn btn-outline-secondary btn-sm" onclick="selectAllHistory()">
+                  <input type="checkbox" id="selectAllCheckbox" style="margin-right: 0.5rem;">Tümünü Seç
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="deleteSelectedHistory()" id="deleteSelectedBtn" disabled>
+                  🗑️ Seçilenleri Sil (<span id="selectedHistoryCount">0</span>)
+                </button>
+              </div>
+              {% endif %}
+            </div>
             
             <div class="table-responsive">
               <table class="table table-hover">
                 <thead>
                   <tr>
+                    <th style="width: 40px;"></th>
                     <th>Tarih</th>
                     <th>Sunucu</th>
                     <th>IP</th>
@@ -5049,12 +5720,16 @@ TEMPLATE_HEALTHCHECK = r"""
                     <th>RAM</th>
                     <th>PostgreSQL</th>
                     <th>Kontrol Eden</th>
+                    <th style="text-align: center;">İşlemler</th>
                   </tr>
                 </thead>
                 <tbody>
                   {% if history %}
                     {% for record in history %}
                     <tr>
+                      <td>
+                        <input type="checkbox" class="history-checkbox" value="{{ record.id }}" onchange="updateDeleteButton()">
+                      </td>
                       <td style="font-size: 0.875rem;">{{ record.created_at }}</td>
                       <td><strong>{{ record.hostname }}</strong></td>
                       <td class="text-muted">{{ record.ip }}</td>
@@ -5075,11 +5750,15 @@ TEMPLATE_HEALTHCHECK = r"""
                         {% endif %}
                       </td>
                       <td class="text-muted">{{ record.checked_by_username }}</td>
+                      <td style="text-align: center;">
+                        <a href="/healthcheck/detail/{{ record.id }}" class="btn btn-primary btn-sm" style="margin-right: 0.25rem;">📋 Detay</a>
+                        <button onclick="deleteSingleHistory({{ record.id }}, '{{ record.hostname }}')" class="btn btn-danger btn-sm" title="Sil">🗑️</button>
+                      </td>
                     </tr>
                     {% endfor %}
                   {% else %}
                     <tr>
-                      <td colspan="8" class="text-center text-muted">Henüz healthcheck geçmişi bulunmamaktadır.</td>
+                      <td colspan="10" class="text-center text-muted">Henüz healthcheck geçmişi bulunmamaktadır.</td>
                     </tr>
                   {% endif %}
                 </tbody>
@@ -5269,8 +5948,8 @@ TEMPLATE_HEALTHCHECK = r"""
               html += `<div class="detail-item"><div class="detail-label">CPU</div><div class="detail-value">${result.cpu_info}</div></div>`;
             }
             
-            if (result.cpu_cores) {
-              html += `<div class="detail-item"><div class="detail-label">CPU Cores</div><div class="detail-value">${result.cpu_cores}</div></div>`;
+            if (result.cpu_details && result.cpu_details !== 'N/A') {
+              html += `<div class="detail-item"><div class="detail-label">CPU Detayları</div><div class="detail-value" style="font-size: 0.9rem; color: var(--txt-secondary);">${result.cpu_details}</div></div>`;
             }
             
             if (result.ram_total) {
@@ -5387,8 +6066,10 @@ TEMPLATE_HEALTHCHECK = r"""
         html += '<div class="detail-section">';
         html += '<h5 class="detail-section-title">⚙️ CPU Bilgileri</h5>';
         html += '<div class="detail-grid">';
-        html += `<div class="detail-row"><span class="detail-label">CPU Model:</span><span class="detail-value">${result.cpu_info || 'N/A'}</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">CPU Cores:</span><span class="detail-value">${result.cpu_cores || 'N/A'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">CPU:</span><span class="detail-value">${result.cpu_info || 'N/A'}</span></div>`;
+        if (result.cpu_details && result.cpu_details !== 'N/A') {
+          html += `<div class="detail-row"><span class="detail-label">Detaylar:</span><span class="detail-value" style="font-size: 0.9rem; color: var(--txt-secondary);">${result.cpu_details}</span></div>`;
+        }
         html += `<div class="detail-row"><span class="detail-label">Load Average:</span><span class="detail-value">${result.load_average || 'N/A'}</span></div>`;
         html += '</div>';
         
@@ -5999,6 +6680,91 @@ TEMPLATE_HEALTHCHECK = r"""
         }
       }
 
+      // History deletion functions
+      function updateDeleteButton() {
+        const checkboxes = document.querySelectorAll('.history-checkbox:checked');
+        const deleteBtn = document.getElementById('deleteSelectedBtn');
+        const countSpan = document.getElementById('selectedHistoryCount');
+        
+        if (checkboxes && countSpan) {
+          countSpan.textContent = checkboxes.length;
+        }
+        
+        if (deleteBtn) {
+          deleteBtn.disabled = checkboxes.length === 0;
+        }
+      }
+      
+      function selectAllHistory() {
+        const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+        const checkboxes = document.querySelectorAll('.history-checkbox');
+        
+        checkboxes.forEach(cb => {
+          cb.checked = selectAllCheckbox.checked;
+        });
+        
+        updateDeleteButton();
+      }
+      
+      async function deleteSingleHistory(id, hostname) {
+        if (!confirm(`"${hostname}" sunucusunun healthcheck kaydını silmek istediğinize emin misiniz?`)) {
+          return;
+        }
+        
+        try {
+          const response = await fetch(`/api/healthcheck/delete/${id}`, {
+            method: 'DELETE'
+          });
+          
+          if (response.ok) {
+            alert('Kayıt başarıyla silindi!');
+            window.location.reload();
+          } else {
+            const data = await response.json();
+            alert('Silme işlemi başarısız: ' + (data.error || 'Bilinmeyen hata'));
+          }
+        } catch (error) {
+          console.error('Delete error:', error);
+          alert('Silme işlemi sırasında hata oluştu: ' + error.message);
+        }
+      }
+      
+      async function deleteSelectedHistory() {
+        const checkboxes = document.querySelectorAll('.history-checkbox:checked');
+        const ids = Array.from(checkboxes).map(cb => cb.value);
+        
+        if (ids.length === 0) {
+          alert('Lütfen silmek istediğiniz kayıtları seçin!');
+          return;
+        }
+        
+        if (!confirm(`${ids.length} adet healthcheck kaydını silmek istediğinize emin misiniz? Bu işlem geri alınamaz!`)) {
+          return;
+        }
+        
+        try {
+          const response = await fetch('/api/healthcheck/delete-multiple', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ ids: ids })
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            alert(`${data.deleted_count} kayıt başarıyla silindi!`);
+            window.location.reload();
+          } else {
+            const data = await response.json();
+            alert('Silme işlemi başarısız: ' + (data.error || 'Bilinmeyen hata'));
+          }
+        } catch (error) {
+          console.error('Delete error:', error);
+          alert('Silme işlemi sırasında hata oluştu: ' + error.message);
+        }
+      }
+
       // Initialize theme on page load
       document.addEventListener('DOMContentLoaded', function() {
         initTheme();
@@ -6013,10 +6779,1201 @@ TEMPLATE_HEALTHCHECK = r"""
         checkboxes.forEach(cb => {
           cb.addEventListener('change', updateSelectedCount);
         });
+        
+        // Update delete button state on page load
+        updateDeleteButton();
       });
     </script>
     
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
+"""
+
+# Healthcheck Detay Sayfası Template
+TEMPLATE_HEALTHCHECK_DETAIL = r"""
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Healthcheck Detay</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      :root[data-theme="dark"] {
+        --bg: #0f1419;
+        --bg-gradient-start: #0a0e13;
+        --bg-gradient-end: #0f1419;
+        --panel: #1a1f26;
+        --hover: #242b36;
+        --border: #2d3748;
+        --txt: #e2e8f0;
+        --txt-secondary: #94a3b8;
+        --accent-blue: #3b82f6;
+        --accent-green: #10b981;
+        --accent-purple: #8b5cf6;
+        --accent-orange: #f59e0b;
+        --accent-red: #ef4444;
+        --accent-cyan: #06b6d4;
+      }
+      :root[data-theme="light"] {
+        --bg: #f8fafc;
+        --bg-gradient-start: #f1f5f9;
+        --bg-gradient-end: #f8fafc;
+        --panel: #ffffff;
+        --hover: #f1f5f9;
+        --border: #e2e8f0;
+        --txt: #1e293b;
+        --txt-secondary: #64748b;
+        --accent-blue: #3b82f6;
+        --accent-green: #10b981;
+        --accent-purple: #8b5cf6;
+        --accent-orange: #f59e0b;
+        --accent-red: #ef4444;
+        --accent-cyan: #06b6d4;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: linear-gradient(180deg, var(--bg-gradient-start), var(--bg-gradient-end));
+        color: var(--txt);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        min-height: 100vh;
+        transition: all 0.3s ease;
+      }
+      
+      /* Navbar */
+      .navbar {
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 1.25rem 2rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        backdrop-filter: blur(10px);
+      }
+      
+      .back-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.625rem 1.25rem;
+        background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+        border: none;
+        border-radius: 0.75rem;
+        color: white;
+        text-decoration: none;
+        font-weight: 500;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+      }
+      .back-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
+        color: white;
+      }
+      
+      /* Theme Toggle */
+      #themeToggle {
+        background: var(--hover);
+        border: 1px solid var(--border);
+        border-radius: 0.75rem;
+        padding: 0.625rem 1rem;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-size: 1.25rem;
+      }
+      #themeToggle:hover {
+        background: var(--panel);
+        transform: scale(1.05);
+      }
+      
+      .detail-container {
+        max-width: 1400px;
+        margin: 2rem auto;
+        padding: 0 2rem 4rem 2rem;
+      }
+      
+      /* Header Card */
+      .detail-header {
+        background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+        border-radius: 1.5rem;
+        padding: 2.5rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        color: white;
+        position: relative;
+        overflow: hidden;
+      }
+      .detail-header::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 300px;
+        height: 300px;
+        background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+        border-radius: 50%;
+        transform: translate(30%, -30%);
+      }
+      .detail-header h1 {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 0.75rem;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      }
+      .detail-header p {
+        opacity: 0.9;
+        font-size: 1.1rem;
+      }
+      
+      .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1.5rem;
+        border-radius: 2rem;
+        font-weight: 600;
+        font-size: 1rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      }
+      .status-badge.success {
+        background: rgba(255, 255, 255, 0.95);
+        color: var(--accent-green);
+      }
+      .status-badge.error {
+        background: rgba(255, 255, 255, 0.95);
+        color: var(--accent-red);
+      }
+      
+      /* Section Cards */
+      .detail-section {
+        background: var(--panel);
+        border-radius: 1.25rem;
+        padding: 2rem;
+        margin-bottom: 1.5rem;
+        border: 1px solid var(--border);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+        transition: all 0.3s ease;
+      }
+      .detail-section:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+      }
+      
+      .detail-section-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 3px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      
+      /* Color coded section titles */
+      .section-system { border-left: 4px solid var(--accent-blue); }
+      .section-cpu { border-left: 4px solid var(--accent-purple); }
+      .section-ram { border-left: 4px solid var(--accent-green); }
+      .section-disk { border-left: 4px solid var(--accent-cyan); }
+      .section-postgres { border-left: 4px solid #336791; }
+      .section-ha { border-left: 4px solid var(--accent-orange); }
+      .section-network { border-left: 4px solid var(--accent-cyan); }
+      .section-services { border-left: 4px solid var(--accent-purple); }
+      
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 1rem;
+      }
+      
+      .detail-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem;
+        background: var(--hover);
+        border-radius: 0.75rem;
+        border: 1px solid var(--border);
+        transition: all 0.2s ease;
+      }
+      .detail-row:hover {
+        background: var(--panel);
+        border-color: var(--accent-blue);
+        transform: translateX(4px);
+      }
+      
+      .detail-label {
+        font-weight: 600;
+        color: var(--txt-secondary);
+        font-size: 0.95rem;
+      }
+      
+      .detail-value {
+        color: var(--txt);
+        font-weight: 500;
+        text-align: right;
+        word-break: break-word;
+      }
+      
+      /* Info Cards */
+      .info-card {
+        background: linear-gradient(135deg, var(--hover), var(--panel));
+        padding: 1.5rem;
+        border-radius: 1rem;
+        border: 1px solid var(--border);
+        margin-bottom: 1rem;
+      }
+      
+      .info-card h6 {
+        font-weight: 700;
+        margin-bottom: 1rem;
+        font-size: 1.1rem;
+        color: var(--txt);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      
+      /* Pre/Code styling */
+      pre {
+        background: var(--hover);
+        padding: 1.25rem;
+        border-radius: 0.75rem;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        border: 1px solid var(--border);
+        font-family: 'Fira Code', 'Courier New', monospace;
+        font-size: 0.9rem;
+        line-height: 1.6;
+        color: var(--txt);
+        box-shadow: inset 0 2px 8px rgba(0,0,0,0.05);
+      }
+      
+      /* Badge styles */
+      .badge {
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        font-size: 0.875rem;
+      }
+      .badge.bg-success {
+        background: linear-gradient(135deg, var(--accent-green), #059669) !important;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+      }
+      .badge.bg-secondary {
+        background: linear-gradient(135deg, #6b7280, #4b5563) !important;
+      }
+      
+      /* HA Status badges */
+      .ha-badge {
+        display: inline-block;
+        padding: 0.5rem 1rem;
+        border-radius: 0.75rem;
+        font-weight: 600;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      .ha-badge-green { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); border: 2px solid var(--accent-green); }
+      .ha-badge-blue { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); border: 2px solid var(--accent-blue); }
+      .ha-badge-orange { background: rgba(245, 158, 11, 0.2); color: var(--accent-orange); border: 2px solid var(--accent-orange); }
+      .ha-badge-purple { background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); border: 2px solid var(--accent-purple); }
+      
+      /* Scrollbar */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--hover);
+        border-radius: 5px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 5px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--accent-blue);
+      }
+      
+      /* Animations */
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .detail-section {
+        animation: fadeIn 0.5s ease-out forwards;
+      }
+      .detail-section:nth-child(1) { animation-delay: 0.1s; }
+      .detail-section:nth-child(2) { animation-delay: 0.15s; }
+      .detail-section:nth-child(3) { animation-delay: 0.2s; }
+      .detail-section:nth-child(4) { animation-delay: 0.25s; }
+      .detail-section:nth-child(5) { animation-delay: 0.3s; }
+      
+      /* Modern Table Styles */
+      .modern-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        margin-top: 1rem;
+      }
+      .modern-table thead {
+        background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+        color: white;
+      }
+      .modern-table thead th {
+        padding: 1rem;
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.95rem;
+        border: none;
+      }
+      .modern-table thead th:first-child {
+        border-top-left-radius: 0.75rem;
+      }
+      .modern-table thead th:last-child {
+        border-top-right-radius: 0.75rem;
+      }
+      .modern-table tbody tr {
+        background: var(--hover);
+        border-bottom: 1px solid var(--border);
+        transition: all 0.2s ease;
+      }
+      .modern-table tbody tr:hover {
+        background: var(--panel);
+        transform: scale(1.01);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      }
+      .modern-table tbody tr:last-child td:first-child {
+        border-bottom-left-radius: 0.75rem;
+      }
+      .modern-table tbody tr:last-child td:last-child {
+        border-bottom-right-radius: 0.75rem;
+      }
+      .modern-table tbody td {
+        padding: 1rem;
+        border: none;
+        color: var(--txt);
+      }
+      
+      /* Process List Styles */
+      .process-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+      .process-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1rem;
+        background: var(--hover);
+        border-radius: 0.75rem;
+        border-left: 4px solid var(--accent-purple);
+        transition: all 0.2s ease;
+      }
+      .process-item:hover {
+        background: var(--panel);
+        transform: translateX(8px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      }
+      .process-name {
+        flex: 1;
+        font-weight: 500;
+        color: var(--txt);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.9rem;
+      }
+      .process-usage {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .usage-bar {
+        width: 120px;
+        height: 8px;
+        background: var(--border);
+        border-radius: 4px;
+        overflow: hidden;
+        position: relative;
+      }
+      .usage-fill {
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan));
+        border-radius: 4px;
+        transition: width 0.3s ease;
+      }
+      .usage-fill.high {
+        background: linear-gradient(90deg, var(--accent-orange), var(--accent-red));
+      }
+      .usage-text {
+        font-weight: 600;
+        color: var(--accent-blue);
+        min-width: 50px;
+        text-align: right;
+      }
+      
+      /* Disk Item Styles */
+      .disk-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      .disk-item {
+        background: var(--hover);
+        border-radius: 0.75rem;
+        padding: 1.25rem;
+        border: 1px solid var(--border);
+        transition: all 0.2s ease;
+      }
+      .disk-item:hover {
+        background: var(--panel);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      }
+      .disk-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+      }
+      .disk-device {
+        font-weight: 700;
+        color: var(--txt);
+        font-size: 1.1rem;
+      }
+      .disk-mount {
+        color: var(--txt-secondary);
+        font-style: italic;
+      }
+      .disk-usage-bar {
+        width: 100%;
+        height: 12px;
+        background: var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-top: 0.5rem;
+        position: relative;
+      }
+      .disk-usage-fill {
+        height: 100%;
+        border-radius: 6px;
+        transition: width 0.5s ease;
+        background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan));
+      }
+      .disk-usage-fill.warning {
+        background: linear-gradient(90deg, var(--accent-orange), #f59e0b);
+      }
+      .disk-usage-fill.danger {
+        background: linear-gradient(90deg, var(--accent-red), #dc2626);
+      }
+      .disk-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+      .disk-stat {
+        display: flex;
+        flex-direction: column;
+      }
+      .disk-stat-label {
+        font-size: 0.85rem;
+        color: var(--txt-secondary);
+        margin-bottom: 0.25rem;
+      }
+      .disk-stat-value {
+        font-weight: 600;
+        color: var(--txt);
+        font-size: 1rem;
+      }
+      
+      /* Service List Styles */
+      .service-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+      .service-item {
+        padding: 0.75rem 1rem;
+        background: var(--hover);
+        border-radius: 0.5rem;
+        border-left: 4px solid var(--accent-green);
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        transition: all 0.2s ease;
+      }
+      .service-item:hover {
+        background: var(--panel);
+        transform: translateX(4px);
+      }
+      .service-item.failed {
+        border-left-color: var(--accent-red);
+      }
+      .service-icon {
+        font-size: 1.25rem;
+      }
+      .service-name {
+        flex: 1;
+        font-weight: 500;
+        color: var(--txt);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.9rem;
+      }
+      .service-status {
+        font-size: 0.85rem;
+        color: var(--txt-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Navbar -->
+    <nav class="navbar">
+      <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <h2 style="margin: 0; font-weight: 700; font-size: 1.5rem;">🏥 Healthcheck Detay</h2>
+        </div>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <button id="themeToggle" onclick="toggleTheme()">🌙</button>
+          <a href="/healthcheck" class="back-button">
+            <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+            </svg>
+            Geri Dön
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <div class="detail-container">
+      <!-- Header -->
+      <div class="detail-header">
+        <div style="display: flex; justify-content: space-between; align-items: start; position: relative; z-index: 1;">
+          <div>
+            <h1>{{ record.hostname }}</h1>
+            <p style="margin: 0; font-size: 1.1rem;">{{ record.ip }} • {{ record.created_at }}</p>
+            <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.2);">
+              <small style="opacity: 0.9; font-size: 1rem;">👤 Kontrol Eden: <strong>{{ record.checked_by_username }}</strong></small>
+            </div>
+          </div>
+          <div>
+            {% if record.status == 'success' %}
+              <span class="status-badge success">✓ Başarılı</span>
+            {% else %}
+              <span class="status-badge error">✗ Hata</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Sistem Bilgileri -->
+      <div class="detail-section section-system">
+        <h5 class="detail-section-title">💻 Sistem Bilgileri</h5>
+        <div class="detail-grid">
+          <div class="detail-row"><span class="detail-label">İşletim Sistemi:</span><span class="detail-value">{{ record.os_info or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Kernel:</span><span class="detail-value">{{ record.kernel_version or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Mimari:</span><span class="detail-value">{{ record.architecture or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Son Açılış:</span><span class="detail-value">{{ record.last_boot or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Uptime:</span><span class="detail-value">{{ record.uptime or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Timezone:</span><span class="detail-value">{{ record.timezone or 'N/A' }}</span></div>
+        </div>
+        
+        <!-- System Update Status -->
+        {% if record.system_update_status and record.system_update_status != 'N/A' %}
+        <div style="margin-top: 1.5rem;">
+          {% if record.system_update_status == 'up-to-date' %}
+            <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 0.75rem; padding: 1rem;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span style="font-size: 1.5rem;">✓</span>
+                <div>
+                  <div style="font-weight: 600; color: #10b981; font-size: 1rem;">Sistem Güncellemeleri</div>
+                  <div style="font-size: 0.9rem; color: var(--txt); margin-top: 0.25rem;">{{ record.system_update_message or 'Sistem güncel' }}</div>
+                </div>
+              </div>
+            </div>
+          {% elif record.system_update_status == 'updates-available' %}
+            <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 0.75rem; padding: 1rem;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span style="font-size: 1.5rem;">⚠️</span>
+                <div>
+                  <div style="font-weight: 600; color: #f59e0b; font-size: 1rem;">Sistem Güncellemeleri</div>
+                  <div style="font-size: 0.9rem; color: var(--txt); margin-top: 0.25rem;">{{ record.system_update_message or 'Güncellemeler mevcut' }}</div>
+                </div>
+              </div>
+            </div>
+          {% else %}
+            <div style="background: rgba(107, 114, 128, 0.1); border: 1px solid rgba(107, 114, 128, 0.3); border-radius: 0.75rem; padding: 1rem;">
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <span style="font-size: 1.5rem;">ℹ️</span>
+                <div>
+                  <div style="font-weight: 600; color: #6b7280; font-size: 1rem;">Sistem Güncellemeleri</div>
+                  <div style="font-size: 0.9rem; color: var(--txt); margin-top: 0.25rem;">{{ record.system_update_message or 'Durum bilinmiyor' }}</div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- CPU Bilgileri -->
+      <div class="detail-section section-cpu">
+        <h5 class="detail-section-title">⚙️ CPU Bilgileri</h5>
+        <div class="detail-grid">
+          <div class="detail-row"><span class="detail-label">CPU:</span><span class="detail-value">{{ record.cpu_info or 'N/A' }}</span></div>
+          {% if record.cpu_details and record.cpu_details != 'N/A' %}
+          <div class="detail-row"><span class="detail-label">Detaylar:</span><span class="detail-value">{{ record.cpu_details }}</span></div>
+          {% endif %}
+          <div class="detail-row"><span class="detail-label">Load Average:</span><span class="detail-value">{{ record.load_average or 'N/A' }}</span></div>
+        </div>
+        {% if record.top_cpu_processes and record.top_cpu_processes != 'N/A' %}
+        <div class="info-card" style="margin-top: 1.5rem;">
+          <h6>📊 En Çok CPU Kullanan İşlemler</h6>
+          <div class="process-list" id="cpuProcessList" data-processes="{{ record.top_cpu_processes }}"></div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- RAM Bilgileri -->
+      <div class="detail-section section-ram">
+        <h5 class="detail-section-title">🧠 RAM Bilgileri</h5>
+        <div class="detail-grid">
+          <div class="detail-row"><span class="detail-label">Toplam:</span><span class="detail-value">{{ record.ram_total or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Kullanılan:</span><span class="detail-value">{{ record.ram_used or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Boş:</span><span class="detail-value">{{ record.ram_free or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Swap:</span><span class="detail-value">{{ record.swap_memory or 'N/A' }}</span></div>
+        </div>
+        {% if record.top_memory_processes and record.top_memory_processes != 'N/A' %}
+        <div class="info-card" style="margin-top: 1.5rem;">
+          <h6>📊 En Çok RAM Kullanan İşlemler</h6>
+          <div class="process-list" id="ramProcessList" data-processes="{{ record.top_memory_processes }}"></div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Disk Bilgileri -->
+      {% if record.disks and record.disks != '[]' %}
+      <div class="detail-section section-disk">
+        <h5 class="detail-section-title">💾 Disk Bilgileri</h5>
+        <div class="detail-grid" style="margin-bottom: 1.5rem;">
+          <div class="detail-row"><span class="detail-label">Disk Tipi:</span><span class="detail-value">{{ record.disk_type or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Yazma Hızı:</span><span class="detail-value">{{ record.disk_write_speed or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Okuma Hızı:</span><span class="detail-value">{{ record.disk_read_speed or 'N/A' }}</span></div>
+        </div>
+        <div class="disk-list" id="diskList" data-disks="{{ record.disks|e }}"></div>
+      </div>
+      {% endif %}
+
+      <!-- PostgreSQL Bilgileri -->
+      {% if record.postgresql_status == 'Var' %}
+      <div class="detail-section section-postgres">
+        <h5 class="detail-section-title">🐘 PostgreSQL Bilgileri</h5>
+        <div class="detail-grid">
+          <div class="detail-row"><span class="detail-label">Durum:</span><span class="detail-value"><span class="badge bg-success">{{ record.postgresql_status }}</span></span></div>
+          <div class="detail-row"><span class="detail-label">Versiyon:</span><span class="detail-value">{{ record.postgresql_version or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Port:</span><span class="detail-value">{{ record.pg_port or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Data Directory:</span><span class="detail-value">{{ record.pg_data_directory or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Aktif Bağlantı:</span><span class="detail-value">{{ record.pg_connection_count or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Max Bağlantı:</span><span class="detail-value">{{ record.pg_max_connections or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Toplam Boyut:</span><span class="detail-value">{{ record.pg_total_size or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">PostgreSQL Uptime:</span><span class="detail-value">{{ record.pg_uptime or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Replication:</span><span class="detail-value">{{ record.postgresql_replication or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">pgBackRest:</span><span class="detail-value">{{ record.pgbackrest_status or 'N/A' }}</span></div>
+        </div>
+        
+        <!-- PostgreSQL Ayarları -->
+        <div class="info-card" style="margin-top: 1.5rem;">
+          <h6>⚙️ PostgreSQL Ayarları</h6>
+          <div class="detail-grid">
+            <div class="detail-row"><span class="detail-label">Shared Buffers:</span><span class="detail-value">{{ record.pg_shared_buffers or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Work Mem:</span><span class="detail-value">{{ record.pg_work_mem or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Effective Cache Size:</span><span class="detail-value">{{ record.pg_effective_cache_size or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Maintenance Work Mem:</span><span class="detail-value">{{ record.pg_maintenance_work_mem or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">WAL Level:</span><span class="detail-value">{{ record.pg_wal_level or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Archive Mode:</span><span class="detail-value">{{ record.pg_archive_mode or 'N/A' }}</span></div>
+          </div>
+        </div>
+
+        <!-- Databases -->
+        {% if record.pg_databases and record.pg_databases != 'N/A' %}
+        <div class="info-card" style="margin-top: 1rem;">
+          <h6>📁 Databases</h6>
+          <pre>{{ record.pg_databases }}</pre>
+        </div>
+        {% endif %}
+        
+        <!-- PostgreSQL Backup Araçları -->
+        <div class="info-card" style="margin-top: 1.5rem;">
+          <h6>💾 PostgreSQL Backup Araçları</h6>
+          
+          <!-- pgBackRest -->
+          <div style="background: var(--hover); border-radius: 0.75rem; padding: 1rem; margin-bottom: 0.75rem; border-left: 3px solid #3b82f6;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 600; font-size: 0.95rem;">🔵 pgBackRest</span>
+              {% if record.pgbackrest_status == 'Var' %}
+                <span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">KURULU</span>
+              {% else %}
+                <span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">YOK</span>
+              {% endif %}
+            </div>
+            {% if record.pgbackrest_details and record.pgbackrest_details not in ['Yok', 'N/A'] %}
+              <div style="margin-top: 0.75rem; background: var(--panel); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">
+                <pre style="margin: 0; font-size: 0.85rem; line-height: 1.6;">{{ record.pgbackrest_details }}</pre>
+              </div>
+            {% endif %}
+          </div>
+          
+          <!-- pg_probackup -->
+          <div style="background: var(--hover); border-radius: 0.75rem; padding: 1rem; margin-bottom: 0.75rem; border-left: 3px solid #f59e0b;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 600; font-size: 0.95rem;">🟡 pg_probackup</span>
+              {% if record.pg_probackup_status == 'Var' %}
+                <span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">KURULU</span>
+              {% else %}
+                <span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">YOK</span>
+              {% endif %}
+            </div>
+            {% if record.pg_probackup_details and record.pg_probackup_details not in ['Yok', 'N/A'] %}
+              <div style="margin-top: 0.75rem; background: var(--panel); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">
+                <pre style="margin: 0; font-size: 0.85rem; line-height: 1.6;">{{ record.pg_probackup_details }}</pre>
+              </div>
+            {% endif %}
+          </div>
+          
+          <!-- pgBarman -->
+          <div style="background: var(--hover); border-radius: 0.75rem; padding: 1rem; margin-bottom: 0; border-left: 3px solid #8b5cf6;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 600; font-size: 0.95rem;">🟣 pgBarman</span>
+              {% if record.pgbarman_status == 'Var' %}
+                <span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">KURULU</span>
+              {% else %}
+                <span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">YOK</span>
+              {% endif %}
+            </div>
+            {% if record.pgbarman_details and record.pgbarman_details not in ['Yok', 'N/A'] %}
+              <div style="margin-top: 0.75rem; background: var(--panel); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">
+                <pre style="margin: 0; font-size: 0.85rem; line-height: 1.6;">{{ record.pgbarman_details }}</pre>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- High Availability Tools -->
+      {% if (record.patroni_status and record.patroni_status == 'Var') or 
+            (record.repmgr_status and record.repmgr_status == 'Var') or 
+            (record.paf_status and record.paf_status == 'Var') or 
+            (record.citus_status and record.citus_status != 'Yok') or 
+            (record.streaming_replication_status and record.streaming_replication_status not in ['N/A', 'Yok (Standalone)']) %}
+      <div class="detail-section section-ha">
+        <h5 class="detail-section-title">🔄 High Availability ve Replication</h5>
+        
+        {% if record.patroni_status == 'Var' %}
+        <div class="info-card">
+          <h6><span class="ha-badge ha-badge-green">🟢 Patroni</span></h6>
+          <pre>{{ record.patroni_details or 'N/A' }}</pre>
+        </div>
+        {% endif %}
+        
+        {% if record.repmgr_status == 'Var' %}
+        <div class="info-card">
+          <h6><span class="ha-badge ha-badge-blue">🔵 Repmgr</span></h6>
+          <pre>{{ record.repmgr_details or 'N/A' }}</pre>
+        </div>
+        {% endif %}
+        
+        {% if record.paf_status == 'Var' %}
+        <div class="info-card">
+          <h6><span class="ha-badge ha-badge-orange">🟠 PAF/Pacemaker</span></h6>
+          <pre>{{ record.paf_details or 'N/A' }}</pre>
+        </div>
+        {% endif %}
+        
+        {% if record.citus_status and record.citus_status != 'Yok' %}
+        <div class="info-card">
+          <h6><span class="ha-badge ha-badge-purple">🟣 Citus</span></h6>
+          <pre>{{ record.citus_details or 'N/A' }}</pre>
+        </div>
+        {% endif %}
+        
+        {% if record.streaming_replication_status and record.streaming_replication_status not in ['N/A', 'Yok (Standalone)'] %}
+        <div class="info-card">
+          <h6><span class="ha-badge ha-badge-blue">📤 Streaming Replication</span></h6>
+          <div class="detail-row" style="margin-bottom: 1rem;"><span class="detail-label">Durum:</span><span class="detail-value">{{ record.streaming_replication_status }}</span></div>
+          <pre>{{ record.streaming_replication_details or 'N/A' }}</pre>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Network Bilgileri -->
+      <div class="detail-section section-network">
+        <h5 class="detail-section-title">🌐 Network Bilgileri</h5>
+        <div class="detail-grid">
+          <div class="detail-row"><span class="detail-label">Network Info:</span><span class="detail-value">{{ record.network_info or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">DNS Servers:</span><span class="detail-value">{{ record.dns_servers or 'N/A' }}</span></div>
+          <div class="detail-row"><span class="detail-label">Total Connections:</span><span class="detail-value">{{ record.total_connections or 'N/A' }}</span></div>
+        </div>
+        
+        <!-- Network Interfaces -->
+        {% if record.network_interfaces and record.network_interfaces != 'N/A' %}
+        <div class="info-card" style="margin-top: 1.5rem;">
+          <h6>🔌 Network Interfaces</h6>
+          <div id="networkInterfaces" data-interfaces="{{ record.network_interfaces }}"></div>
+        </div>
+        {% endif %}
+        
+        <!-- Listening Ports -->
+        {% if record.listening_ports and record.listening_ports != 'N/A' %}
+        <div class="info-card" style="margin-top: 1rem;">
+          <h6>🔓 Dinlenen Portlar</h6>
+          <div id="listeningPorts" data-ports="{{ record.listening_ports }}"></div>
+        </div>
+        {% endif %}
+      </div>
+      
+      <!-- Kernel Parameters (PostgreSQL için önemli) -->
+      {% if record.kernel_params and record.kernel_params not in ['{}', 'N/A'] %}
+      <div class="detail-section section-system">
+        <h5 class="detail-section-title">⚙️ Kernel Parametreleri (PostgreSQL için Kritik)</h5>
+        <div id="kernelParams" data-params="{{ record.kernel_params|e }}"></div>
+      </div>
+      {% endif %}
+
+      <!-- Servis Bilgileri -->
+      <div class="detail-section section-services">
+        <h5 class="detail-section-title">🔧 Servis Bilgileri</h5>
+        {% if record.running_services and record.running_services != 'N/A' %}
+        <div class="info-card">
+          <h6>✅ Çalışan Servisler</h6>
+          <div class="service-list" id="runningServicesList" data-services="{{ record.running_services }}"></div>
+        </div>
+        {% endif %}
+        
+        {% if record.failed_services and record.failed_services not in ['N/A', 'None'] %}
+        <div class="info-card">
+          <h6>⚠️ Başarısız Servisler</h6>
+          <div class="service-list" id="failedServicesList" data-services="{{ record.failed_services }}"></div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Hata Mesajı -->
+      {% if record.error_message and record.error_message != 'N/A' %}
+      <div class="detail-section" style="border-left: 4px solid var(--accent-red); background: linear-gradient(135deg, rgba(239, 68, 68, 0.05), var(--panel));">
+        <h5 class="detail-section-title" style="color: var(--accent-red);">❌ Hata Mesajı</h5>
+        <pre style="border-left: 4px solid var(--accent-red);">{{ record.error_message }}</pre>
+      </div>
+      {% endif %}
+    </div>
+
+    <script>
+      // Theme toggle function
+      function toggleTheme() {
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', newTheme);
+        
+        const themeIcon = document.getElementById('themeToggle');
+        if (themeIcon) {
+          themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+        }
+        
+        localStorage.setItem('theme', newTheme);
+      }
+      
+      // Initialize theme on page load
+      function initTheme() {
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+        
+        const themeIcon = document.getElementById('themeToggle');
+        if (themeIcon) {
+          themeIcon.textContent = savedTheme === 'dark' ? '🌙' : '☀️';
+        }
+      }
+      
+      // Parse and render process list
+      function renderProcessList(elementId, type) {
+        const element = document.getElementById(elementId);
+        if (!element) return;
+        
+        const data = element.getAttribute('data-processes');
+        if (!data || data === 'N/A') return;
+        
+        // Parse process data - format: "process1 12.4% | process2 0.3% | ..."
+        const processes = data.split(' | ').map(p => {
+          const parts = p.trim().split(' ');
+          const percentage = parts[parts.length - 1].replace('%', '');
+          const name = parts.slice(0, -1).join(' ');
+          return { name, percentage: parseFloat(percentage) };
+        }).filter(p => p.name && !isNaN(p.percentage));
+        
+        element.innerHTML = processes.map(proc => {
+          const isHigh = proc.percentage > 50;
+          const fillClass = isHigh ? 'high' : '';
+          return `
+            <div class="process-item">
+              <div class="process-name">${proc.name}</div>
+              <div class="process-usage">
+                <div class="usage-bar">
+                  <div class="usage-fill ${fillClass}" style="width: ${Math.min(proc.percentage, 100)}%"></div>
+                </div>
+                <div class="usage-text">${proc.percentage}%</div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+      
+      // Parse and render disk list
+      function renderDiskList() {
+        const element = document.getElementById('diskList');
+        if (!element) return;
+        
+        const data = element.getAttribute('data-disks');
+        if (!data || data === '[]') return;
+        
+        try {
+          const disks = JSON.parse(data);
+          
+          element.innerHTML = disks.map(disk => {
+            const percentNum = parseInt(disk.percent.replace('%', ''));
+            let fillClass = '';
+            if (percentNum >= 90) fillClass = 'danger';
+            else if (percentNum >= 70) fillClass = 'warning';
+            
+            return `
+              <div class="disk-item">
+                <div class="disk-header">
+                  <div>
+                    <div class="disk-device">💿 ${disk.device}</div>
+                    <div class="disk-mount">📁 ${disk.mount}</div>
+                  </div>
+                  <div style="text-align: right;">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent-blue);">${disk.percent}</div>
+                    <div style="font-size: 0.85rem; color: var(--txt-secondary);">Kullanım</div>
+                  </div>
+                </div>
+                <div class="disk-usage-bar">
+                  <div class="disk-usage-fill ${fillClass}" style="width: ${disk.percent}"></div>
+                </div>
+                <div class="disk-stats">
+                  <div class="disk-stat">
+                    <div class="disk-stat-label">Toplam</div>
+                    <div class="disk-stat-value">${disk.size}</div>
+                  </div>
+                  <div class="disk-stat">
+                    <div class="disk-stat-label">Kullanılan</div>
+                    <div class="disk-stat-value">${disk.used}</div>
+                  </div>
+                  <div class="disk-stat">
+                    <div class="disk-stat-label">Boş</div>
+                    <div class="disk-stat-value">${disk.avail}</div>
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('');
+        } catch (e) {
+          console.error('Disk parsing error:', e);
+          element.innerHTML = '<pre>' + data + '</pre>';
+        }
+      }
+      
+      // Parse and render service list
+      function renderServiceList(elementId, isFailed) {
+        const element = document.getElementById(elementId);
+        if (!element) return;
+        
+        const data = element.getAttribute('data-services');
+        if (!data || data === 'N/A' || data === 'None') return;
+        
+        // Parse services - format: "service1.service, service2.service" or detailed format with status
+        let services = [];
+        
+        if (isFailed && data.includes('|||')) {
+          // Failed services with detailed info
+          services = data.split(' ||| ').map(s => {
+            const parts = s.trim().split(' (');
+            return {
+              name: parts[0],
+              status: parts[1] ? parts[1].replace(')', '') : 'failed'
+            };
+          });
+        } else {
+          // Simple format
+          services = data.split(/,|\s+/).filter(s => s.trim()).map(s => ({
+            name: s.trim(),
+            status: isFailed ? 'failed' : 'active'
+          }));
+        }
+        
+        element.innerHTML = services.map(service => {
+          const icon = isFailed ? '❌' : '✅';
+          const failedClass = isFailed ? 'failed' : '';
+          return `
+            <div class="service-item ${failedClass}">
+              <div class="service-icon">${icon}</div>
+              <div class="service-name">${service.name}</div>
+              ${service.status !== 'active' && service.status !== 'failed' ? 
+                `<div class="service-status">${service.status}</div>` : ''}
+            </div>
+          `;
+        }).join('');
+      }
+      
+      // Render network interfaces
+      function renderNetworkInterfaces() {
+        const element = document.getElementById('networkInterfaces');
+        if (!element) return;
+        
+        const data = element.getAttribute('data-interfaces');
+        if (!data || data === 'N/A') return;
+        
+        const interfaces = data.split('\\n').filter(i => i.trim());
+        element.innerHTML = interfaces.map(iface => {
+          return `
+            <div style="background: var(--hover); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 0.5rem; border-left: 3px solid #3b82f6; font-family: monospace; font-size: 0.9rem;">
+              ${iface.trim()}
+            </div>
+          `;
+        }).join('');
+      }
+      
+      // Render listening ports
+      function renderListeningPorts() {
+        const element = document.getElementById('listeningPorts');
+        if (!element) return;
+        
+        const data = element.getAttribute('data-ports');
+        if (!data || data === 'N/A') return;
+        
+        const ports = data.split(',').map(p => p.trim()).filter(p => p);
+        element.innerHTML = '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">' + 
+          ports.map(port => {
+            const portNum = parseInt(port);
+            let portColor = '#3b82f6';
+            let portLabel = '';
+            
+            if (portNum === 22) { portColor = '#10b981'; portLabel = ' SSH'; }
+            else if (portNum === 80) { portColor = '#f59e0b'; portLabel = ' HTTP'; }
+            else if (portNum === 443) { portColor = '#f59e0b'; portLabel = ' HTTPS'; }
+            else if (portNum === 5432) { portColor = '#3b82f6'; portLabel = ' PostgreSQL'; }
+            else if (portNum === 3306) { portColor = '#ef4444'; portLabel = ' MySQL'; }
+            else if (portNum === 8123) { portColor = '#8b5cf6'; portLabel = ' ClickHouse'; }
+            
+            return `<span style="background: ${portColor}; color: white; padding: 0.35rem 0.85rem; border-radius: 0.5rem; font-size: 0.9rem; font-weight: 500;">${port}${portLabel}</span>`;
+          }).join('') + '</div>';
+      }
+      
+      // Render kernel parameters
+      function renderKernelParams() {
+        const element = document.getElementById('kernelParams');
+        if (!element) return;
+        
+        const data = element.getAttribute('data-params');
+        if (!data || data === '{}' || data === 'N/A') return;
+        
+        try {
+          const params = JSON.parse(data);
+          
+          let html = '';
+          
+          // Shared Memory
+          html += '<div class="info-card">';
+          html += '<h6>💾 Paylaşımlı Bellek (Shared Memory)</h6>';
+          html += '<div class="detail-grid">';
+          html += `<div class="detail-row"><span class="detail-label">SHMMAX:</span><span class="detail-value">${params.shmmax || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">SHMALL:</span><span class="detail-value">${params.shmall || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">SHMMNI:</span><span class="detail-value">${params.shmmni || 'N/A'}</span></div>`;
+          html += '</div></div>';
+          
+          // Semaphore
+          html += '<div class="info-card" style="margin-top: 1rem;">';
+          html += '<h6>🔗 Semaphore Parametreleri</h6>';
+          html += '<div class="detail-grid">';
+          if (params.semmsl) html += `<div class="detail-row"><span class="detail-label">SEMMSL:</span><span class="detail-value">${params.semmsl}</span></div>`;
+          if (params.semmns) html += `<div class="detail-row"><span class="detail-label">SEMMNS:</span><span class="detail-value">${params.semmns}</span></div>`;
+          if (params.semopm) html += `<div class="detail-row"><span class="detail-label">SEMOPM:</span><span class="detail-value">${params.semopm}</span></div>`;
+          if (params.semmni) html += `<div class="detail-row"><span class="detail-label">SEMMNI:</span><span class="detail-value">${params.semmni}</span></div>`;
+          if (params.sem) html += `<div class="detail-row" style="grid-column: 1 / -1;"><span class="detail-label">SEM:</span><span class="detail-value">${params.sem}</span></div>`;
+          html += '</div></div>';
+          
+          // VM/Memory Tuning
+          html += '<div class="info-card" style="margin-top: 1rem;">';
+          html += '<h6>📊 VM ve Bellek Ayarları</h6>';
+          html += '<div class="detail-grid">';
+          
+          if (params.vmswappiness) {
+            let swapColor = 'var(--txt)';
+            if (params.vmswappiness.includes('Yüksek')) swapColor = '#ef4444';
+            else if (params.vmswappiness.includes('Düşük')) swapColor = '#10b981';
+            html += `<div class="detail-row"><span class="detail-label">VM Swappiness:</span><span class="detail-value" style="color: ${swapColor}; font-weight: 600;">${params.vmswappiness}</span></div>`;
+          }
+          
+          if (params.transparent_hugepage) {
+            let thpColor = 'var(--txt)';
+            if (params.transparent_hugepage.includes('never')) thpColor = '#10b981';
+            else if (params.transparent_hugepage.includes('always')) thpColor = '#ef4444';
+            else if (params.transparent_hugepage.includes('madvise')) thpColor = '#f59e0b';
+            html += `<div class="detail-row"><span class="detail-label">Transparent Huge Pages:</span><span class="detail-value" style="color: ${thpColor}; font-weight: 600;">${params.transparent_hugepage}</span></div>`;
+          }
+          
+          html += `<div class="detail-row"><span class="detail-label">Dirty Background Ratio:</span><span class="detail-value">${params.vmdirty_background_ratio || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Dirty Ratio:</span><span class="detail-value">${params.vmdirty_ratio || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Overcommit Memory:</span><span class="detail-value">${params.vm_overcommit_memory || 'N/A'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Overcommit Ratio:</span><span class="detail-value">${params.vm_overcommit_ratio || 'N/A'}</span></div>`;
+          html += '</div></div>';
+          
+          element.innerHTML = html;
+        } catch (e) {
+          console.error('Kernel params parsing error:', e);
+          element.innerHTML = '<pre>' + data + '</pre>';
+        }
+      }
+      
+      // Initialize all components on page load
+      document.addEventListener('DOMContentLoaded', function() {
+        initTheme();
+        
+        // Render CPU processes
+        renderProcessList('cpuProcessList', 'cpu');
+        
+        // Render RAM processes
+        renderProcessList('ramProcessList', 'ram');
+        
+        // Render disk list
+        renderDiskList();
+        
+        // Render services
+        renderServiceList('runningServicesList', false);
+        renderServiceList('failedServicesList', true);
+        
+        // Render network interfaces
+        renderNetworkInterfaces();
+        
+        // Render listening ports
+        renderListeningPorts();
+        
+        // Render kernel parameters
+        renderKernelParams();
+      });
+      
+      // Run theme init immediately
+      initTheme();
+    </script>
   </body>
 </html>
 """
@@ -6444,6 +8401,25 @@ def healthcheck():
     
     return render_template_string(TEMPLATE_HEALTHCHECK, servers=servers, history=history)
 
+# Healthcheck Detay Sayfası
+@app.route("/healthcheck/detail/<int:record_id>")
+@require_auth("multiquery")
+def healthcheck_detail(record_id):
+    # Healthcheck detay sayfası ziyaret edildiğini logla
+    log_activity(session['user_id'], session['username'], 'healthcheck_detail_access', 
+                f'Healthcheck detayını görüntüledi (ID: {record_id})', 'healthcheck')
+    
+    # Healthcheck kaydını çek
+    record = db_query("SELECT * FROM healthcheck_results WHERE id = ?", (record_id,))
+    
+    if not record:
+        flash("Healthcheck kaydı bulunamadı", "danger")
+        return redirect(url_for('healthcheck'))
+    
+    record = record[0]
+    
+    return render_template_string(TEMPLATE_HEALTHCHECK_DETAIL, record=record)
+
 # Healthcheck API - Run healthcheck on selected servers
 @app.route("/api/healthcheck/run", methods=["POST"])
 @require_auth("multiquery")
@@ -6516,20 +8492,62 @@ def api_healthcheck_run():
                 except:
                     result['os_info'] = 'N/A'
                 
-                # CPU Info
+                # CPU Info, Cores ve Sockets - Geliştirilmiş
                 try:
+                    # CPU model bilgisini al
                     stdin, stdout, stderr = ssh.exec_command("cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d':' -f2 | xargs")
-                    result['cpu_info'] = stdout.read().decode().strip() or 'N/A'
+                    cpu_model = stdout.read().decode().strip()
+                    
+                    # Toplam core sayısını al (logical cores)
+                    stdin, stdout, stderr = ssh.exec_command("nproc")
+                    total_cores = stdout.read().decode().strip()
+                    
+                    # Physical core sayısını al
+                    stdin, stdout, stderr = ssh.exec_command("grep 'cpu cores' /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs")
+                    physical_cores = stdout.read().decode().strip()
+                    
+                    # Socket sayısını al (fiziksel CPU sayısı)
+                    stdin, stdout, stderr = ssh.exec_command("grep 'physical id' /proc/cpuinfo | sort -u | wc -l")
+                    sockets = stdout.read().decode().strip()
+                    
+                    # Hyperthreading kontrolü
+                    hyperthreading = "Yes" if (total_cores and physical_cores and int(total_cores) > int(physical_cores)) else "No"
+                    
+                    # CPU bilgisini birleştir
+                    if cpu_model and total_cores:
+                        result['cpu_info'] = f"{cpu_model} ({total_cores} cores)"
+                        result['cpu_cores'] = f"{total_cores} cores"
+                        
+                        # Socket ve core detaylarını hazırla
+                        cpu_details = []
+                        if sockets and int(sockets) > 0:
+                            cpu_details.append(f"{sockets} socket(s)")
+                        if physical_cores and total_cores:
+                            if int(physical_cores) < int(total_cores):
+                                cpu_details.append(f"{physical_cores} physical cores")
+                                cpu_details.append(f"{total_cores} logical cores")
+                            else:
+                                cpu_details.append(f"{total_cores} cores")
+                        if hyperthreading == "Yes":
+                            cpu_details.append("HT enabled")
+                        
+                        result['cpu_details'] = " | ".join(cpu_details) if cpu_details else f"{total_cores} cores"
+                    elif cpu_model:
+                        result['cpu_info'] = cpu_model
+                        result['cpu_cores'] = 'N/A'
+                        result['cpu_details'] = 'N/A'
+                    elif total_cores:
+                        result['cpu_info'] = f"CPU ({total_cores} cores)"
+                        result['cpu_cores'] = f"{total_cores} cores"
+                        result['cpu_details'] = f"{total_cores} cores"
+                    else:
+                        result['cpu_info'] = 'N/A'
+                        result['cpu_cores'] = 'N/A'
+                        result['cpu_details'] = 'N/A'
                 except:
                     result['cpu_info'] = 'N/A'
-                
-                # CPU Cores
-                try:
-                    stdin, stdout, stderr = ssh.exec_command("nproc")
-                    cores = stdout.read().decode().strip()
-                    result['cpu_cores'] = f"{cores} cores" if cores else 'N/A'
-                except:
                     result['cpu_cores'] = 'N/A'
+                    result['cpu_details'] = 'N/A'
                 
                 # RAM Info - Total
                 try:
@@ -6603,16 +8621,30 @@ def api_healthcheck_run():
                         
                         # PostgreSQL Version - Multiple methods
                         try:
+                            pg_version = None
+                            
                             # Method 1: psql --version (doesn't require sudo)
                             stdin, stdout, stderr = ssh.exec_command("psql --version 2>/dev/null")
                             pg_version = stdout.read().decode().strip()
+                            
                             if not pg_version or 'PostgreSQL' not in pg_version:
                                 # Method 2: pg_config (doesn't require sudo)
                                 stdin, stdout, stderr = ssh.exec_command("pg_config --version 2>/dev/null")
                                 pg_version = stdout.read().decode().strip()
+                            
                             if not pg_version or 'PostgreSQL' not in pg_version:
-                                # Method 3: sudo -u postgres psql
+                                # Method 3: sudo -u postgres psql SELECT version()
                                 stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c 'SELECT version();' 2>/dev/null")
+                                pg_version = stdout.read().decode().strip()
+                            
+                            if not pg_version or 'PostgreSQL' not in pg_version:
+                                # Method 4: postgres --version
+                                stdin, stdout, stderr = ssh.exec_command("postgres --version 2>/dev/null")
+                                pg_version = stdout.read().decode().strip()
+                            
+                            if not pg_version or 'PostgreSQL' not in pg_version:
+                                # Method 5: pg_ctl --version
+                                stdin, stdout, stderr = ssh.exec_command("pg_ctl --version 2>/dev/null")
                                 pg_version = stdout.read().decode().strip()
                             
                             if pg_version and 'PostgreSQL' in pg_version:
@@ -6620,8 +8652,44 @@ def api_healthcheck_run():
                                 version_match = re.search(r'PostgreSQL (\d+\.?\d*)', pg_version)
                                 if version_match:
                                     result['postgresql_version'] = f"PostgreSQL {version_match.group(1)}"
+                                else:
+                                    # Fallback: use the full version string
+                                    result['postgresql_version'] = pg_version
+                            else:
+                                result['postgresql_version'] = 'PostgreSQL aktif (versiyon alınamadı)'
+                                
                         except Exception as e:
                             print(f"PG Version error: {e}")
+                            result['postgresql_version'] = 'PostgreSQL aktif (versiyon alınamadı)'
+                        
+                        # PostgreSQL Uptime
+                        try:
+                            stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c \"SELECT pg_postmaster_start_time() AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Istanbul';\" 2>/dev/null")
+                            pg_start_time = stdout.read().decode().strip()
+                            if pg_start_time:
+                                result['pg_uptime'] = pg_start_time
+                        except:
+                            pass
+                        
+                        # PostgreSQL Toplam Boyut
+                        try:
+                            # Method 1: Tüm database'lerin toplam boyutu
+                            stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c \"SELECT pg_size_pretty(sum(pg_database_size(datname))) FROM pg_database WHERE datistemplate = false;\" 2>/dev/null")
+                            pg_size = stdout.read().decode().strip()
+                            
+                            if not pg_size:
+                                # Method 2: Sadece postgres database boyutu
+                                stdin, stdout, stderr = ssh.exec_command("sudo -n -u postgres psql -t -c \"SELECT pg_size_pretty(pg_database_size('postgres'));\" 2>/dev/null")
+                                pg_size = stdout.read().decode().strip()
+                            
+                            if not pg_size:
+                                # Method 3: Data directory boyutu
+                                stdin, stdout, stderr = ssh.exec_command("sudo -n du -sh /var/lib/postgresql/*/main 2>/dev/null | head -1 | awk '{print $1}'")
+                                pg_size = stdout.read().decode().strip()
+                            
+                            if pg_size:
+                                result['pg_total_size'] = pg_size
+                        except:
                             pass
                         
                         # Replication Status
@@ -8019,11 +10087,12 @@ fi
                      kernel_params, kernel_params_summary,
                      patroni_status, patroni_details, repmgr_status, repmgr_details,
                      paf_status, paf_details, citus_status, citus_details,
-                     streaming_replication_status, streaming_replication_details, ha_tools_summary)
+                     streaming_replication_status, streaming_replication_details, ha_tools_summary,
+                     cpu_details)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     server_id,
                     result['hostname'],
@@ -8101,6 +10170,7 @@ fi
                     result.get('streaming_replication_status', 'N/A'),
                     result.get('streaming_replication_details', 'N/A'),
                     result.get('ha_tools_summary', 'N/A'),
+                    result.get('cpu_details', 'N/A'),
                 ))
                 print(f"[DEBUG] Healthcheck sonucu başarıyla kaydedildi")
             except Exception as e:
@@ -9176,6 +11246,7 @@ def admin_panel():
         'faydali_linkler': {'name': 'Faydalı Linkler', 'description': 'Faydalı linkler menüsü'},
         'view_logs': {'name': 'Log Görüntüleme', 'description': 'Aktivite loglarını görüntüleme'},
         'envanter': {'name': 'Sunucu Envanteri', 'description': 'Sunucu envanter yönetimi'},
+        'healthcheck': {'name': 'Healthcheck', 'description': 'Sunucu sağlık kontrolü ve geçmişi'},
         'admin_panel': {'name': 'Admin Panel', 'description': 'Admin yönetim paneli'}
     }
     
@@ -9209,7 +11280,7 @@ def admin_add_user():
     
     # Seçilen yetkileri al (normal kullanıcı için)
     selected_permissions = []
-    permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
+    permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter', 'healthcheck']
     
     for page in permission_pages:
         if request.form.get(page):
@@ -9317,7 +11388,7 @@ def admin_edit_user(user_id):
                 db_execute("DELETE FROM user_permissions WHERE user_id = ?", [user_id])
                 
                 # Yeni yetkileri ekle (admin panel yetkisi hariç)
-                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
+                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter', 'healthcheck']
                 for page in permission_pages:
                     if request.form.get(page):
                         db_execute("""
@@ -9328,7 +11399,7 @@ def admin_edit_user(user_id):
             # Yetki değişikliklerini logla
             permission_changes = []
             if session.get('is_admin') and not user['is_admin']:
-                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter']
+                permission_pages = ['multiquery', 'pg_install', 'faydali_linkler', 'view_logs', 'envanter', 'healthcheck']
                 for page in permission_pages:
                     if request.form.get(page):
                         permission_changes.append(page)
@@ -9356,6 +11427,7 @@ def admin_edit_user(user_id):
         'faydali_linkler': {'name': 'Faydalı Linkler', 'description': 'Faydalı linkler menüsü'},
         'view_logs': {'name': 'Log Görüntüleme', 'description': 'Aktivite loglarını görüntüleme'},
         'envanter': {'name': 'Sunucu Envanteri', 'description': 'Sunucu envanter yönetimi'},
+        'healthcheck': {'name': 'Healthcheck', 'description': 'Sunucu sağlık kontrolü ve geçmişi'},
         'admin_panel': {'name': 'Admin Panel', 'description': 'Admin yönetim paneli'}
     }
 
@@ -10075,6 +12147,370 @@ def test_server_connection():
             result += f"❌ Port {test_port}: {str(e)}<br>"
     
     return result
+
+
+# Healthcheck silme endpoint'leri
+@app.route("/api/healthcheck/delete/<int:record_id>", methods=["DELETE"])
+@require_auth("healthcheck")
+def delete_healthcheck_record(record_id):
+    """Tek bir healthcheck kaydını siler"""
+    try:
+        # Kaydın var olup olmadığını kontrol et
+        record = db_query("SELECT * FROM healthcheck_results WHERE id = ?", (record_id,))
+        
+        if not record:
+            return jsonify({"error": "Kayıt bulunamadı"}), 404
+        
+        # Kaydı sil
+        db_execute("DELETE FROM healthcheck_results WHERE id = ?", (record_id,))
+        
+        # Log kaydı
+        log_activity(
+            session.get('user_id'),
+            session.get('username'),
+            'healthcheck_delete',
+            f"Healthcheck kaydı silindi: ID={record_id}, Hostname={record[0]['hostname']}",
+            'healthcheck'
+        )
+        
+        return jsonify({"success": True, "message": "Kayıt başarıyla silindi"}), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/healthcheck/delete-multiple", methods=["POST"])
+@require_auth("healthcheck")
+def delete_multiple_healthcheck_records():
+    """Birden fazla healthcheck kaydını siler"""
+    try:
+        data = request.get_json()
+        ids = data.get('ids', [])
+        
+        if not ids:
+            return jsonify({"error": "Silinecek kayıt seçilmedi"}), 400
+        
+        # IDs listesini integer'a çevir
+        try:
+            ids = [int(id_) for id_ in ids]
+        except ValueError:
+            return jsonify({"error": "Geçersiz ID formatı"}), 400
+        
+        # Kayıtları sil
+        placeholders = ','.join(['?' for _ in ids])
+        query = f"DELETE FROM healthcheck_results WHERE id IN ({placeholders})"
+        db_execute(query, tuple(ids))
+        
+        # Log kaydı
+        log_activity(
+            session.get('user_id'),
+            session.get('username'),
+            'healthcheck_delete_multiple',
+            f"{len(ids)} adet healthcheck kaydı silindi: IDs={ids}",
+            'healthcheck'
+        )
+        
+        return jsonify({
+            "success": True,
+            "message": f"{len(ids)} kayıt başarıyla silindi",
+            "deleted_count": len(ids)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Admin Dashboard Stats API
+@app.route("/api/admin/dashboard-stats", methods=["GET"])
+@require_auth("admin_panel")
+def get_admin_dashboard_stats():
+    """Admin dashboard için detaylı istatistikler"""
+    try:
+        # Toplam sunucu sayısı
+        total_servers_query = db_query("SELECT COUNT(*) as count FROM sunucu_envanteri")
+        total_servers = total_servers_query[0]['count'] if total_servers_query else 0
+        
+        # PostgreSQL sunucu sayısı
+        pg_servers_query = db_query("SELECT COUNT(*) as count FROM sunucu_envanteri WHERE postgresql_status = 'Var'")
+        pg_servers = pg_servers_query[0]['count'] if pg_servers_query else 0
+        
+        # Toplam kullanıcı sayısı
+        total_users_query = db_query("SELECT COUNT(*) as count FROM users")
+        total_users = total_users_query[0]['count'] if total_users_query else 0
+        
+        # Aktif kullanıcı sayısı
+        active_users_query = db_query("SELECT COUNT(*) as count FROM users WHERE is_active = 1")
+        active_users = active_users_query[0]['count'] if active_users_query else 0
+        
+        # Bugünkü sorgu sayısı
+        today_queries_query = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%SQL%' AND DATE(timestamp) = DATE('now')
+        """)
+        today_queries = today_queries_query[0]['count'] if today_queries_query else 0
+        
+        # Bu haftaki sorgu sayısı
+        weekly_queries_query = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%SQL%' AND timestamp >= datetime('now', '-7 days')
+        """)
+        weekly_queries = weekly_queries_query[0]['count'] if weekly_queries_query else 0
+        
+        # Toplam healthcheck sayısı
+        total_healthchecks_query = db_query("SELECT COUNT(*) as count FROM healthcheck_results")
+        total_healthchecks = total_healthchecks_query[0]['count'] if total_healthchecks_query else 0
+        
+        # Bugünkü healthcheck sayısı
+        today_healthchecks_query = db_query("""
+            SELECT COUNT(*) as count FROM healthcheck_results 
+            WHERE DATE(created_at) = DATE('now')
+        """)
+        today_healthchecks = today_healthchecks_query[0]['count'] if today_healthchecks_query else 0
+        
+        # Son 24 saatteki başarısız healthcheck sayısı
+        failed_healthchecks_query = db_query("""
+            SELECT COUNT(*) as count FROM healthcheck_results 
+            WHERE status != 'success' AND created_at >= datetime('now', '-1 day')
+        """)
+        failed_healthchecks = failed_healthchecks_query[0]['count'] if failed_healthchecks_query else 0
+        
+        # Son 10 aktivite
+        recent_activities = db_query("""
+            SELECT username, action, page_name, 
+                   strftime('%d.%m.%Y %H:%M', timestamp) as timestamp
+            FROM activity_logs 
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        """)
+        
+        # PostgreSQL sunucuları
+        postgresql_servers = db_query("""
+            SELECT hostname, ip, postgresql_version, postgresql_status
+            FROM sunucu_envanteri 
+            WHERE postgresql_status = 'Var'
+            ORDER BY hostname
+        """)
+        
+        # En aktif kullanıcılar (son 7 gün)
+        top_users = db_query("""
+            SELECT u.username, u.full_name, COUNT(a.id) as activity_count
+            FROM users u
+            LEFT JOIN activity_logs a ON u.id = a.user_id 
+                AND a.timestamp >= datetime('now', '-7 days')
+            WHERE u.is_active = 1
+            GROUP BY u.id, u.username, u.full_name
+            ORDER BY activity_count DESC
+            LIMIT 5
+        """)
+        
+        # Kritik uyarılar
+        critical_alerts = []
+        
+        # %90 üzeri disk doluluk kontrolü
+        critical_servers = db_query("""
+            SELECT hostname, ip, disks 
+            FROM sunucu_envanteri 
+            WHERE disks IS NOT NULL AND disks != '[]'
+        """)
+        
+        import json
+        for server in critical_servers:
+            try:
+                disks = json.loads(server['disks'])
+                for disk in disks:
+                    percent = int(disk.get('percent', '0').replace('%', ''))
+                    if percent >= 90:
+                        critical_alerts.append({
+                            'severity': 'critical',
+                            'title': f"Kritik Disk Doluluk: {server['hostname']}",
+                            'message': f"{disk['device']} ({disk['mount']}) - {disk['percent']} dolu!",
+                            'action': '/envanter'
+                        })
+            except:
+                pass
+        
+        # Başarısız healthcheck kontrolü
+        if failed_healthchecks > 0:
+            critical_alerts.append({
+                'severity': 'warning',
+                'title': f"{failed_healthchecks} Başarısız Healthcheck",
+                'message': f"Son 24 saatte {failed_healthchecks} healthcheck başarısız oldu.",
+                'action': '/healthcheck'
+            })
+        
+        # Geçen haftaki veriler (karşılaştırma için)
+        last_week_queries = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%SQL%' 
+            AND timestamp >= datetime('now', '-14 days')
+            AND timestamp < datetime('now', '-7 days')
+        """)
+        last_week_queries_count = last_week_queries[0]['count'] if last_week_queries else 0
+        
+        last_week_healthchecks = db_query("""
+            SELECT COUNT(*) as count FROM healthcheck_results 
+            WHERE created_at >= datetime('now', '-14 days')
+            AND created_at < datetime('now', '-7 days')
+        """)
+        last_week_healthchecks_count = last_week_healthchecks[0]['count'] if last_week_healthchecks else 0
+        
+        last_week_logins = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%Giriş%' 
+            AND timestamp >= datetime('now', '-14 days')
+            AND timestamp < datetime('now', '-7 days')
+        """)
+        last_week_logins_count = last_week_logins[0]['count'] if last_week_logins else 0
+        
+        # Bu haftaki veriler
+        this_week_logins = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%Giriş%' AND timestamp >= datetime('now', '-7 days')
+        """)
+        this_week_logins_count = this_week_logins[0]['count'] if this_week_logins else 0
+        
+        this_week_healthchecks = db_query("""
+            SELECT COUNT(*) as count FROM healthcheck_results 
+            WHERE created_at >= datetime('now', '-7 days')
+        """)
+        this_week_healthchecks_count = this_week_healthchecks[0]['count'] if this_week_healthchecks else 0
+        
+        # Yüzde değişim hesapla
+        def calc_change(current, previous):
+            if previous == 0:
+                return 0
+            return round(((current - previous) / previous) * 100)
+        
+        # Son 7 günün günlük aktiviteleri (grafik için)
+        daily_activities = db_query("""
+            SELECT DATE(timestamp) as day, COUNT(*) as count
+            FROM activity_logs
+            WHERE timestamp >= datetime('now', '-7 days')
+            GROUP BY DATE(timestamp)
+            ORDER BY day
+        """)
+        
+        # Günleri formatla
+        for activity in daily_activities:
+            day_str = activity['day']
+            # YYYY-MM-DD formatını DD/MM'ye çevir
+            if day_str:
+                parts = day_str.split('-')
+                if len(parts) == 3:
+                    activity['day'] = f"{parts[2]}/{parts[1]}"
+        
+        # Son 5 giriş
+        recent_logins = db_query("""
+            SELECT u.username, u.full_name, a.ip_address,
+                   strftime('%d.%m.%Y %H:%M', a.timestamp) as timestamp
+            FROM activity_logs a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.action LIKE '%Giriş%'
+            ORDER BY a.timestamp DESC
+            LIMIT 5
+        """)
+        
+        # Database metrikleri
+        import os
+        db_size = 0
+        db_size_mb = "0 MB"
+        try:
+            db_path = SQLITE_PATH
+            if os.path.exists(db_path):
+                db_size = os.path.getsize(db_path)
+                if db_size < 1024:
+                    db_size_mb = f"{db_size} B"
+                elif db_size < 1024 * 1024:
+                    db_size_mb = f"{db_size / 1024:.2f} KB"
+                else:
+                    db_size_mb = f"{db_size / (1024 * 1024):.2f} MB"
+        except:
+            pass
+        
+        # Toplam kayıt sayısı
+        total_records = db_query("""
+            SELECT 
+                (SELECT COUNT(*) FROM sunucu_envanteri) +
+                (SELECT COUNT(*) FROM healthcheck_results) +
+                (SELECT COUNT(*) FROM activity_logs) +
+                (SELECT COUNT(*) FROM users) as total
+        """)
+        total_records_count = total_records[0]['total'] if total_records else 0
+        
+        # Healthcheck başarı oranı
+        success_healthchecks = db_query("SELECT COUNT(*) as count FROM healthcheck_results WHERE status = 'success'")
+        success_count = success_healthchecks[0]['count'] if success_healthchecks else 0
+        success_rate = round((success_count / total_healthchecks * 100)) if total_healthchecks > 0 else 0
+        
+        # Sistem uptime (uygulama ne zaman başlatıldı?)
+        from datetime import datetime
+        import time
+        uptime_seconds = time.time() - os.path.getctime(db_path) if os.path.exists(db_path) else 0
+        uptime_days = int(uptime_seconds / 86400)
+        uptime_hours = int((uptime_seconds % 86400) / 3600)
+        system_uptime = f"{uptime_days} gün {uptime_hours} saat"
+        
+        return jsonify({
+            "totalServers": total_servers,
+            "pgServers": pg_servers,
+            "totalUsers": total_users,
+            "activeUsers": active_users,
+            "todayQueries": today_queries,
+            "weeklyQueries": weekly_queries,
+            "totalHealthchecks": total_healthchecks,
+            "todayHealthchecks": today_healthchecks,
+            "failedHealthchecks": failed_healthchecks,
+            "recentActivities": recent_activities,
+            "postgresqlServers": postgresql_servers,
+            "topUsers": top_users,
+            "criticalAlerts": critical_alerts,
+            "weeklyComparison": {
+                "weeklyQueries": weekly_queries,
+                "weeklyHealthchecks": this_week_healthchecks_count,
+                "weeklyLogins": this_week_logins_count,
+                "serversAdded": 0,
+                "queryChange": calc_change(weekly_queries, last_week_queries_count),
+                "healthcheckChange": calc_change(this_week_healthchecks_count, last_week_healthchecks_count),
+                "loginChange": calc_change(this_week_logins_count, last_week_logins_count)
+            },
+            "dailyActivities": daily_activities,
+            "recentLogins": recent_logins,
+            "databaseMetrics": {
+                "dbSize": db_size_mb,
+                "totalRecords": total_records_count,
+                "healthcheckSuccessRate": success_rate,
+                "systemUptime": system_uptime
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Eski API endpoint (geriye uyumluluk için)
+@app.route("/api/stats", methods=["GET"])
+def get_basic_stats():
+    """Basit istatistikler (geriye uyumluluk)"""
+    try:
+        total_servers_query = db_query("SELECT COUNT(*) as count FROM sunucu_envanteri")
+        total_servers = total_servers_query[0]['count'] if total_servers_query else 0
+        
+        total_users_query = db_query("SELECT COUNT(*) as count FROM users WHERE is_active = 1")
+        total_users = total_users_query[0]['count'] if total_users_query else 0
+        
+        today_queries_query = db_query("""
+            SELECT COUNT(*) as count FROM activity_logs 
+            WHERE action LIKE '%SQL%' AND DATE(timestamp) = DATE('now')
+        """)
+        today_queries = today_queries_query[0]['count'] if today_queries_query else 0
+        
+        return jsonify({
+            "servers": total_servers,
+            "users": total_users,
+            "todayQueries": today_queries
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
