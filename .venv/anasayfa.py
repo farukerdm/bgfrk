@@ -34,6 +34,17 @@ except ImportError:
     CRYPTO_AVAILABLE = False
     print("Cryptography kütüphanesi bulunamadı. Şifre şifreleme özellikleri çalışmayacak.")
 
+# 2FA (TOTP) için pyotp ve qrcode
+try:
+    import pyotp
+    import qrcode
+    from io import BytesIO
+    import base64
+    TOTP_AVAILABLE = True
+except ImportError:
+    TOTP_AVAILABLE = False
+    print("pyotp veya qrcode kütüphanesi bulunamadı. 2FA özellikleri çalışmayacak.")
+
 # ---- PostgreSQL sürücü katmanı (psycopg2 -> psycopg3 fallback) ----
 try:
     import psycopg2 as _pg
@@ -235,6 +246,19 @@ def init_db() -> None:
         con.execute("ALTER TABLE activity_logs ADD COLUMN details TEXT")
     except sqlite3.OperationalError:
         pass  # Sütun zaten varsa hata verme
+    
+    try:
+        # users tablosuna 2FA için totp_secret sütunu ekle
+        con.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+    except sqlite3.OperationalError:
+        pass  # Sütun zaten varsa hata verme
+    
+    try:
+        # users tablosuna 2FA için totp_enabled sütunu ekle (varsayılan 0)
+        con.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Sütun zaten varsa hata verme
+    
     con.commit()
     
     # Varsayılan admin kullanıcısı oluştur
@@ -7466,10 +7490,10 @@ TEMPLATE_HEALTHCHECK_DETAIL = r"""
       <div class="detail-section section-disk">
         <h5 class="detail-section-title">💾 Disk Bilgileri</h5>
         <div class="detail-grid" style="margin-bottom: 1.5rem;">
-          <div class="detail-row"><span class="detail-label">Disk Tipi:</span><span class="detail-value">{{ record.disk_type or 'N/A' }}</span></div>
-          <div class="detail-row"><span class="detail-label">Yazma Hızı:</span><span class="detail-value">{{ record.disk_write_speed or 'N/A' }}</span></div>
-          <div class="detail-row"><span class="detail-label">Okuma Hızı:</span><span class="detail-value">{{ record.disk_read_speed or 'N/A' }}</span></div>
-        </div>
+            <div class="detail-row"><span class="detail-label">Disk Tipi:</span><span class="detail-value">{{ record.disk_type or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Yazma Hızı:</span><span class="detail-value">{{ record.disk_write_speed or 'N/A' }}</span></div>
+            <div class="detail-row"><span class="detail-label">Okuma Hızı:</span><span class="detail-value">{{ record.disk_read_speed or 'N/A' }}</span></div>
+          </div>
         <div class="disk-list" id="diskList" data-disks="{{ record.disks|e }}"></div>
       </div>
       {% endif %}
@@ -7524,7 +7548,7 @@ TEMPLATE_HEALTHCHECK_DETAIL = r"""
                 <span style="background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">KURULU</span>
               {% else %}
                 <span style="background: rgba(107, 114, 128, 0.2); color: #6b7280; padding: 0.35rem 0.75rem; border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600;">YOK</span>
-              {% endif %}
+        {% endif %}
             </div>
             {% if record.pgbackrest_details and record.pgbackrest_details not in ['Yok', 'N/A'] %}
               <div style="margin-top: 0.75rem; background: var(--panel); padding: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border);">
@@ -7631,7 +7655,7 @@ TEMPLATE_HEALTHCHECK_DETAIL = r"""
         <div class="info-card" style="margin-top: 1.5rem;">
           <h6>🔌 Network Interfaces</h6>
           <div id="networkInterfaces" data-interfaces="{{ record.network_interfaces }}"></div>
-        </div>
+      </div>
         {% endif %}
         
         <!-- Listening Ports -->
@@ -8239,6 +8263,20 @@ def login():
         
         user = authenticate_user(username, password)
         if user:
+            # ============ 2FA KONTROLÜ ============
+            # 2FA aktif mi kontrol et
+            if user.get('totp_enabled') == 1:
+                # 2FA aktif - doğrulama sayfasına yönlendir
+                session['temp_user_id'] = user['id']
+                return redirect(url_for('verify_2fa'))
+            elif not user.get('totp_secret'):
+                # İlk giriş veya 2FA kurulmamış - kurulum sayfasına yönlendir
+                session['temp_user_id'] = user['id']
+                flash("🔐 Hesabınızı güvenceye almak için lütfen 2FA kurun!", "info")
+                return redirect(url_for('setup_2fa'))
+            # ============ 2FA KONTROLÜ BİTTİ ============
+            
+            # Normal giriş (2FA varsa buraya gelmez, yukarıdaki return'ler çalışır)
             session['user_id'] = user['id']
             session['username'] = user['username']
             session['full_name'] = user['full_name']
@@ -12511,6 +12549,401 @@ def get_basic_stats():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ==================== 2FA (TOTP) Routes ====================
+
+@app.route("/setup-2fa", methods=["GET", "POST"])
+def setup_2fa():
+    """2FA kurulum sayfası - İlk giriş sonrası"""
+    if 'temp_user_id' not in session:
+        return redirect(url_for("login"))
+    
+    user_id = session['temp_user_id']
+    user = db_query("SELECT * FROM users WHERE id = ?", (user_id,))
+    
+    if not user:
+        return redirect(url_for("login"))
+    
+    user = user[0]
+    
+    if request.method == "POST":
+        totp_code = request.form.get("totp_code", "").strip()
+        
+        if not totp_code:
+            flash("Lütfen Google Authenticator'dan kodu girin!", "warning")
+            return redirect(url_for("setup_2fa"))
+        
+        # Secret key'i session'dan al
+        secret = session.get('temp_totp_secret')
+        
+        if not secret:
+            flash("Bir hata oluştu. Lütfen tekrar giriş yapın.", "danger")
+            session.clear()
+            return redirect(url_for("login"))
+        
+        # TOTP doğrula
+        if TOTP_AVAILABLE:
+            totp = pyotp.TOTP(secret)
+            if totp.verify(totp_code, valid_window=1):
+                # Doğrulama başarılı - 2FA'yı etkinleştir
+                db_execute("""
+                    UPDATE users SET totp_secret = ?, totp_enabled = 1 
+                    WHERE id = ?
+                """, (secret, user_id))
+                
+                # Normal session'a geç
+                session.clear()
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                session['full_name'] = user['full_name']
+                session['is_admin'] = user['is_admin']
+                
+                # Last login güncelle
+                db_execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?", (user['id'],))
+                
+                log_activity(user['id'], user['username'], 'setup_2fa', 
+                           f"2FA başarıyla kuruldu - IP: {request.remote_addr}", 'login')
+                
+                flash(f"🎉 2FA başarıyla kuruldu! Hoş geldiniz, {user['full_name']}!", "success")
+                return redirect(url_for("landing"))
+            else:
+                flash("Geçersiz kod! Lütfen Google Authenticator'dan doğru kodu girin.", "danger")
+        else:
+            flash("2FA sistemi kullanılamıyor (pyotp yüklü değil)", "danger")
+    
+    # QR kod oluştur
+    qr_code_data = None
+    secret = None
+    
+    if TOTP_AVAILABLE:
+        # Yeni secret oluştur veya mevcut olanı kullan
+        if 'temp_totp_secret' not in session:
+            secret = pyotp.random_base32()
+            session['temp_totp_secret'] = secret
+        else:
+            secret = session['temp_totp_secret']
+        
+        # TOTP URI oluştur
+        totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(
+            name=user['username'],
+            issuer_name="PostgreSQL Management"
+        )
+        
+        # QR kod oluştur
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(totp_uri)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        buffer = BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        qr_code_data = base64.b64encode(buffer.getvalue()).decode()
+    
+    return render_template_string(TEMPLATE_SETUP_2FA, 
+                                qr_code=qr_code_data, 
+                                secret=secret, 
+                                username=user['username'])
+
+
+@app.route("/verify-2fa", methods=["GET", "POST"])
+def verify_2fa():
+    """2FA doğrulama sayfası - Giriş sonrası"""
+    if 'temp_user_id' not in session:
+        return redirect(url_for("login"))
+    
+    user_id = session['temp_user_id']
+    user = db_query("SELECT * FROM users WHERE id = ?", (user_id,))
+    
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+    
+    user = user[0]
+    
+    if request.method == "POST":
+        totp_code = request.form.get("totp_code", "").strip()
+        
+        if not totp_code:
+            flash("Lütfen Google Authenticator'dan 6 haneli kodu girin!", "warning")
+            return redirect(url_for("verify_2fa"))
+        
+        # TOTP doğrula
+        if TOTP_AVAILABLE and user['totp_secret']:
+            totp = pyotp.TOTP(user['totp_secret'])
+            if totp.verify(totp_code, valid_window=1):
+                # Doğrulama başarılı
+                session.clear()
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                session['full_name'] = user['full_name']
+                session['is_admin'] = user['is_admin']
+                
+                # Last login güncelle
+                db_execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?", (user['id'],))
+                
+                log_activity(user['id'], user['username'], 'login_2fa', 
+                           f"2FA doğrulaması başarılı - IP: {request.remote_addr}", 'login')
+                
+                flash(f"Hoş geldiniz, {user['full_name']}!", "success")
+                return redirect(url_for("landing"))
+            else:
+                flash("Geçersiz kod! Lütfen tekrar deneyin.", "danger")
+                log_activity(user['id'], user['username'], 'login_2fa_failed', 
+                           f"2FA doğrulaması başarısız - IP: {request.remote_addr}", 'login')
+        else:
+            flash("2FA sistemi kullanılamıyor", "danger")
+    
+    return render_template_string(TEMPLATE_VERIFY_2FA, username=user['username'])
+
+
+@app.route("/disable-2fa", methods=["POST"])
+def disable_2fa():
+    """2FA'yı devre dışı bırak (kullanıcı panelinden)"""
+    if 'user_id' not in session:
+        return redirect(url_for("login"))
+    
+    password = request.form.get("password", "")
+    
+    if not password:
+        flash("Şifrenizi girmelisiniz!", "warning")
+        return redirect(url_for("admin_panel"))
+    
+    # Kullanıcıyı doğrula
+    user = db_query("SELECT * FROM users WHERE id = ?", (session['user_id'],))
+    if user:
+        import hashlib
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        if password_hash == user[0]['password_hash']:
+            # 2FA'yı devre dışı bırak
+            db_execute("UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?", (session['user_id'],))
+            log_activity(session['user_id'], session['username'], 'disable_2fa', 
+                       f"2FA devre dışı bırakıldı", 'settings')
+            flash("2FA başarıyla devre dışı bırakıldı!", "success")
+        else:
+            flash("Şifre hatalı!", "danger")
+    
+    return redirect(url_for("admin_panel"))
+
+
+# 2FA Setup Template
+TEMPLATE_SETUP_2FA = r"""
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2FA Kurulum</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .setup-container {
+      background: white;
+      border-radius: 1.5rem;
+      padding: 3rem;
+      max-width: 600px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .qr-box {
+      background: #f8f9fa;
+      border-radius: 1rem;
+      padding: 2rem;
+      text-align: center;
+      margin: 2rem 0;
+      border: 3px dashed #667eea;
+    }
+    .secret-code {
+      background: #fff3cd;
+      border: 2px solid #ffc107;
+      border-radius: 0.75rem;
+      padding: 1rem;
+      font-family: 'Courier New', monospace;
+      font-size: 1.1rem;
+      font-weight: bold;
+      text-align: center;
+      letter-spacing: 2px;
+      margin: 1rem 0;
+      color: #856404;
+    }
+    .step {
+      background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+      border-left: 4px solid #667eea;
+      padding: 1rem;
+      margin: 1rem 0;
+      border-radius: 0.5rem;
+    }
+    .step-number {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: white;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      margin-right: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="setup-container">
+    <h1 style="text-align: center; color: #667eea; margin-bottom: 0.5rem;">🔐 2FA Kurulum</h1>
+    <p style="text-align: center; color: #6c757d; margin-bottom: 2rem;">Hesabınızı daha güvenli hale getirin</p>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    
+    <div class="step">
+      <span class="step-number">1</span>
+      <strong>Google Authenticator'ı indirin</strong>
+      <p style="margin: 0.5rem 0 0 2.5rem; font-size: 0.9rem; color: #6c757d;">
+        Play Store veya App Store'dan <strong>Google Authenticator</strong> uygulamasını indirin.
+      </p>
+    </div>
+    
+    <div class="step">
+      <span class="step-number">2</span>
+      <strong>QR Kodu Tarayın</strong>
+      <div class="qr-box">
+        {% if qr_code %}
+          <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code" style="max-width: 250px;">
+        {% else %}
+          <p style="color: #dc3545;">QR kod oluşturulamadı!</p>
+        {% endif %}
+      </div>
+      <p style="text-align: center; font-size: 0.9rem; color: #6c757d; margin: 1rem 0;">
+        <strong>QR kod tarayamıyor musunuz?</strong> Aşağıdaki kodu manuel olarak girin:
+      </p>
+      <div class="secret-code">{{ secret }}</div>
+    </div>
+    
+    <div class="step">
+      <span class="step-number">3</span>
+      <strong>6 Haneli Kodu Girin</strong>
+      <form method="POST" style="margin-top: 1rem;">
+        <div class="mb-3">
+          <input type="text" name="totp_code" class="form-control form-control-lg" 
+                 placeholder="000000" maxlength="6" pattern="[0-9]{6}" 
+                 style="text-align: center; font-size: 1.5rem; letter-spacing: 0.5rem; font-family: monospace;"
+                 autocomplete="off" required autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg w-100" 
+                style="background: linear-gradient(135deg, #667eea, #764ba2); border: none; font-weight: 600;">
+          ✓ Doğrula ve Devam Et
+        </button>
+      </form>
+    </div>
+    
+    <div class="alert alert-info" style="margin-top: 2rem; border-radius: 0.75rem;">
+      <strong>ℹ️ Bilgi:</strong> Bu ayar sadece bir kez yapılır. Sonraki girişlerinizde otomatik olarak 2FA kodu istenecektir.
+    </div>
+  </div>
+  
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+# 2FA Verification Template
+TEMPLATE_VERIFY_2FA = r"""
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2FA Doğrulama</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .verify-container {
+      background: white;
+      border-radius: 1.5rem;
+      padding: 3rem;
+      max-width: 500px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      text-align: center;
+    }
+    .auth-icon {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="verify-container">
+    <div class="auth-icon">🔐</div>
+    <h1 style="color: #667eea; margin-bottom: 0.5rem;">2FA Doğrulama</h1>
+    <p style="color: #6c757d; margin-bottom: 2rem;">
+      Hoş geldiniz, <strong>{{ username }}</strong>!<br>
+      Google Authenticator'dan 6 haneli kodu girin.
+    </p>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    
+    <form method="POST">
+      <div class="mb-3">
+        <input type="text" name="totp_code" class="form-control form-control-lg" 
+               placeholder="000000" maxlength="6" pattern="[0-9]{6}" 
+               style="text-align: center; font-size: 2rem; letter-spacing: 0.8rem; font-family: monospace;"
+               autocomplete="off" required autofocus>
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg w-100" 
+              style="background: linear-gradient(135deg, #667eea, #764ba2); border: none; font-weight: 600;">
+        🔓 Doğrula
+      </button>
+    </form>
+    
+    <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid #e9ecef;">
+      <p style="font-size: 0.9rem; color: #6c757d;">
+        Kodunuzu alamıyor musunuz?<br>
+        <a href="/login" style="color: #667eea; text-decoration: none; font-weight: 600;">← Giriş sayfasına dön</a>
+      </p>
+    </div>
+  </div>
+  
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Otomatik sayıyı format et
+    document.querySelector('input[name="totp_code"]').addEventListener('input', function(e) {
+      this.value = this.value.replace(/[^0-9]/g, '');
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 if __name__ == "__main__":
